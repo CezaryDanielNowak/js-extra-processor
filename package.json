@@ -1,0 +1,23 @@
+{
+  "name": "js-extra-compressor",
+  "version": "1.0.0",
+  "main": "extra-compress.js",
+  "scripts": {
+    "test": "node test.js",
+"run": "node extra-compress.js widget-v1-en-before.js widget-v1-en-after.js  --report optimization-report.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "description": "AST-based post-minification optimizer for JavaScript bundles",
+  "dependencies": {
+    "@babel/generator": "^7.29.7",
+    "@babel/parser": "^7.29.7",
+    "@babel/traverse": "^7.29.7",
+    "@babel/types": "^7.29.7",
+    "terser": "^5.48.0"
+  },
+  "bin": {
+    "js-extra-compress": "extra-compress.js"
+  }
+}

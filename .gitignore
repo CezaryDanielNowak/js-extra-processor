@@ -1,0 +1,7 @@
+node_modules/
+*.extra.min.js
+*.json.tmp
+
+optimization-report.json
+widget-v1-en-after.js
+widget-v1-en-before.js
