@@ -1,51 +1,123 @@
-# JS Extra Compressor
+# Extra JavaScript Compressor
 
-An AST-based post-processing pass for already-minified JavaScript bundles.
+> Because apparently UglifyJS did not suffer enough.
 
-It performs two transformations:
+A small Node.js post-processing tool for squeezing a little more out of JavaScript that has already been bundled or minified.
 
-1. Replaces repeated string literals, property/method names, and selected built-in globals with collision-free aliases inserted inside an existing function scope.
-2. Rewrites profitable arrays containing only strings from `['A','B',...]` to `'A!B!...'.split('!')` using a delimiter absent from every element.
+It is designed to work **after UglifyJS**, not start a turf war with it. UglifyJS performs general-purpose compression, mangling, dead-code removal, and syntax optimization. This tool applies additional bundle-level transformations that may still be profitable after normal minification.
 
-It intentionally does **not** insert declarations at program/global scope. Program-level occurrences are skipped. Existing top-level functions (common in UMD/Webpack bundles) are used as private alias scopes.
+## Why this exists
 
-## Install
+Sometimes a large production bundle goes through a bundler, UglifyJS, gzip, Brotli, three code reviews, and a small ritual sacrifice—and still contains suspiciously repetitive strings.
+
+This tool is the final pass for that situation.
+
+It is intentionally a **semi-private utility**, not a polished general-purpose minifier. The goals are simple:
+
+- save bytes where the transformation is measurable;
+- stay out of the global scope;
+- avoid heroic rewrites;
+- produce a report so nobody has to trust vibes.
+
+## Real-life gains
+Example input file: 1 860 426 bytes
+
+Raw saving: 160 898 bytes / 8.648%
+Gzip saving: 6 320 bytes / 1.243%
+Brotli saving: 2 206 bytes / 0.556%
+
+## Quick start
 
 ```bash
-npm install
+npx uglify-js dist/widget.js   --compress   --mangle   --output dist/widget.uglify.min.js
+
+node extra-compress.js   dist/widget.uglify.min.js   dist/widget.min.js   --no-string-arrays   --report dist/widget-report.json
 ```
 
-## Run
+That is the usual setup: **UglifyJS first, extra compressor second**.
 
-```bash
-node extra-compress.js input.js output.js --report report.json
+## What it actually does
+
+The compressor currently knows two useful tricks:
+
+1. **Aliases repeated strings, property names, and safe global objects**
+2. **Compacts large arrays of strings using a joined string and `.split()`**
+
+It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
+
+## Tiny example, big ambitions
+
+Repeated values such as:
+
+```js
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+
+component.componentDidMount();
+component.componentWillUnmount();
+component.render();
 ```
 
-Example with stricter thresholds:
+may be transformed into code conceptually similar to:
 
-```bash
-node extra-compress.js input.js output.js \
-  --min-occurrences 6 \
-  --min-saving 4 \
-  --array-min-items 8 \
-  --array-min-saving 2 \
-  --report report.json
+```js
+const a = Object;
+const b = "defineProperty";
+const c = "exports";
+const d = "__esModule";
+const e = "componentDidMount";
+const f = "componentWillUnmount";
+const g = "render";
+
+a[b][c];
 ```
 
-The CLI prints raw, gzip, and Brotli sizes. Raw output can shrink while gzip/Brotli gets slightly larger because those formats already deduplicate repeated text. Always compare the metric that matters for deployment.
+The real output is generated from the JavaScript AST and uses short, collision-free variable names. No regex archaeology involved.
 
-By default, string-array compaction is conservative:
+The aliases are inserted only inside an existing outer function scope. The tool intentionally does not add variables to the global scope.
 
-- Arrays shorter than 6 items are never rewritten.
-- The compressor compares final output with and without array compaction and keeps the smaller bundle.
+## String-array compaction: the `.split()` trick
 
-## Safety boundaries
+A long array containing only strings can be rewritten from:
 
-- Parsing and rewriting are AST-based; comments and license comments beginning with `/*!` are preserved.
-- Alias identifiers are chosen so they do not collide with any identifier inside the containing function subtree.
-- Directives, static import/export specifiers, JSX strings, `constructor`, shorthand properties, and the special `__proto__` object-literal key are not rewritten.
-- Local identifiers such as `exports` are not aliased: they can be reassigned or shadowed, so replacing them with a snapshot would not be generally semantics-preserving.
-- Built-in global aliasing snapshots values such as `Object` at function entry. Disable it with `--no-alias-globals` when code intentionally replaces built-ins at runtime.
-- The array rewrite adds a small startup cost because `.split()` runs at load time.
+```js
+const VALUES = [
+  "VERSION",
+  "SHADING_LANGUAGE_VERSION",
+  "MAX_VERTEX_ATTRIBS",
+  "MAX_VERTEX_UNIFORM_VECTORS"
+];
+```
 
-Run your normal unit, integration, and browser tests on the transformed bundle before deploying it.
+to:
+
+```js
+const VALUES =
+  "VERSION!SHADING_LANGUAGE_VERSION!MAX_VERTEX_ATTRIBS!MAX_VERTEX_UNIFORM_VECTORS"
+    .split("!");
+```
+
+The tool automatically chooses a delimiter that does not occur in any array item and applies the transformation only when it reduces the raw output size by the configured minimum.
+
+## Working together with UglifyJS
+
+The recommended assembly line is:
+
+```text
+source code
+    ↓
+bundler
+    ↓
+UglifyJS
+    ↓
+Extra JavaScript Compressor
+    ↓
+gzip or Brotli
+```
+
+## License
+
+This is a semi-private project, so use whatever project-internal license rules apply. Still, preserve third-party license comments from the original bundle where required.
+
+

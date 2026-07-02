@@ -4,7 +4,8 @@
   "main": "extra-compress.js",
   "scripts": {
     "test": "node test.js",
-"run": "node extra-compress.js widget-v1-en-before.js widget-v1-en-after.js  --report optimization-report.json"
+    "run": "node extra-compress.js widget-v1-en-before.js widget-v1-en-after.js  --report optimization-report.json",
+    "real-life-gains": "node real-life-gains.js"
   },
   "keywords": [],
   "author": "",
