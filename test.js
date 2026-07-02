@@ -74,6 +74,8 @@ assert.deepEqual(execute(output), execute(source));
 assert.ok(report.stringArrays.length >= 1, 'expected at least one compacted string array');
 assert.ok(report.aliases.some((entry) => entry.value === 'default'));
 assert.ok(report.aliases.some((entry) => entry.value === 'Object'));
+assert.equal(report.webpackModuleExtraction.detected, false,
+  'non-webpack fixtures should not report webpack module extraction candidates');
 assert.ok(Buffer.byteLength(output) < Buffer.byteLength(source));
 
 const ast = parse(output, { sourceType: 'script' });
@@ -132,5 +134,79 @@ try {
 
 assert.ok(arrayMinItemsError, 'expected --array-min-items < 6 to fail fast');
 assert.match(String(arrayMinItemsError.stderr), /--array-min-items expects an integer >= 6/);
+
+const webpackSource = `
+(function () {
+  return (() => {
+    var __webpack_modules__ = {
+      1: function (module, __webpack_exports__, __webpack_require__) {
+        'use strict';
+        __webpack_require__.r(__webpack_exports__);
+        __webpack_require__.d(__webpack_exports__, { default: () => localDefault });
+        const localDefault = function () { return 1; };
+      },
+      2: function (module, __webpack_exports__, __webpack_require__) {
+        'use strict';
+        __webpack_require__.r(__webpack_exports__);
+        var dep = __webpack_require__(1);
+        __webpack_require__.d(__webpack_exports__, { default: () => dep.default });
+      }
+    };
+    var __webpack_module_cache__ = {};
+    function __webpack_require__(id) {
+      var cached = __webpack_module_cache__[id];
+      if (cached !== undefined) return cached.exports;
+      var module = __webpack_module_cache__[id] = { exports: {} };
+      __webpack_modules__[id](module, module.exports, __webpack_require__);
+      return module.exports;
+    }
+    __webpack_require__.d = function (exports, definition) {
+      for (var key in definition) {
+        if (__webpack_require__.o(definition, key) && !__webpack_require__.o(exports, key)) {
+          Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+        }
+      }
+    };
+    __webpack_require__.o = function (obj, prop) { return Object.prototype.hasOwnProperty.call(obj, prop); };
+    __webpack_require__.r = function (exports) {
+      if (typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+        Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+      }
+      Object.defineProperty(exports, '__esModule', { value: true });
+    };
+    var __webpack_exports__ = __webpack_require__(2);
+    globalThis.__optimizerResult = { value: __webpack_exports__.default() };
+  })();
+})();
+`;
+const webpackInputFile = path.join(tempDir, 'webpack-input.js');
+const webpackOutputFile = path.join(tempDir, 'webpack-output.js');
+const webpackReportFile = path.join(tempDir, 'webpack-report.json');
+
+fs.writeFileSync(webpackInputFile, webpackSource);
+execFileSync(process.execPath, [
+  cliPath,
+  webpackInputFile,
+  webpackOutputFile,
+  '--min-occurrences', '2',
+  '--min-saving', '0',
+  '--report', webpackReportFile
+], { stdio: 'inherit' });
+
+const webpackOutput = fs.readFileSync(webpackOutputFile, 'utf8');
+const webpackReport = JSON.parse(fs.readFileSync(webpackReportFile, 'utf8'));
+assert.deepEqual(execute(webpackOutput), execute(webpackSource));
+assert.equal(webpackReport.webpackModuleExtraction.detected, true,
+  'webpack-like fixtures should enable extraction analysis');
+assert.ok(webpackReport.webpackModuleExtraction.extractable.totalCandidates >= 1,
+  'expected at least one extractable webpack module candidate');
+assert.ok(webpackReport.webpackModuleExtraction.extractable.byType.defaultLocal >= 1,
+  'expected at least one default-local extractable candidate');
+assert.ok(webpackReport.webpackImportOptimization.attempted,
+  'expected webpack import optimization to run when mappings are available');
+assert.ok(webpackReport.webpackImportOptimization.rewrittenTotal >= 1,
+  'expected at least one rewritten webpack import');
+assert.match(webpackOutput, /__webpack_require__\(1\)/,
+  'expected optimized output to reference the underlying dependency module id');
 
 console.log('All tests passed.');
