@@ -22,9 +22,27 @@ It is intentionally a **semi-private utility**, not a polished general-purpose m
 ## Real-life gains
 Example input file: 1 860 426 bytes
 
-Raw saving: 160 898 bytes / 8.648%
-Gzip saving: 6 320 bytes / 1.243%
-Brotli saving: 2 206 bytes / 0.556%
+Measured on `widget-v1-en-before.js` with current code.
+
+### With string-array compaction
+
+| max-aliases | Raw saving | Gzip saving | Brotli saving |
+| --- | --- | --- | --- |
+| 80  | 160 898 bytes / 8.648% | 6 298 bytes / 1.238% | 2 233 bytes / 0.563% |
+| 120 | 178 060 bytes / 9.571% | 6 929 bytes / 1.363% | 2 271 bytes / 0.573% |
+| 160 | 191 610 bytes / 10.299% | 7 347 bytes / 1.445% | 2 392 bytes / 0.603% |
+| 200 | 202 928 bytes / 10.908% | 7 822 bytes / 1.538% | 2 357 bytes / 0.595% |
+| 240 | 212 369 bytes / 11.415% | 8 253 bytes / 1.623% | 2 465 bytes / 0.622% |
+
+### With `--no-string-arrays`
+
+| max-aliases | Raw saving | Gzip saving | Brotli saving |
+| --- | --- | --- | --- |
+| 80  | 159 566 bytes / 8.577% | 6 708 bytes / 1.319% | 2 208 bytes / 0.557% |
+| 120 | 176 966 bytes / 9.512% | 7 471 bytes / 1.469% | 2 459 bytes / 0.620% |
+| 160 | 190 640 bytes / 10.247% | 7 620 bytes / 1.498% | 2 439 bytes / 0.615% |
+| 200 | 202 052 bytes / 10.861% | 8 174 bytes / 1.607% | 2 575 bytes / 0.650% |
+| 240 | 211 624 bytes / 11.375% | 8 500 bytes / 1.671% | 2 343 bytes / 0.591% |
 
 ## Quick start
 

@@ -478,6 +478,19 @@ function grossSaving(candidate, aliasLength) {
   );
 }
 
+function candidateAssignmentScore(candidate) {
+  if (Number.isFinite(candidate.estimatedSaving)) return candidate.estimatedSaving;
+  if (Number.isFinite(candidate.roughSaving)) return candidate.roughSaving;
+  return Number.NEGATIVE_INFINITY;
+}
+
+function sortForAliasAssignment(candidates) {
+  candidates.sort((a, b) =>
+    candidateAssignmentScore(b) - candidateAssignmentScore(a) ||
+    b.occurrences.length - a.occurrences.length
+  );
+}
+
 function chooseAliases(record, opts) {
   if (!record.forbiddenGlobalWrites) {
     record.forbiddenGlobalWrites = collectForbiddenGlobalWrites(record.rootPath);
@@ -498,9 +511,8 @@ function chooseAliases(record, opts) {
   candidates = candidates.slice(0, Math.max(opts.maxAliases * 3, opts.maxAliases));
 
   for (let pass = 0; pass < 4; pass += 1) {
-    // High-frequency candidates get the shortest collision-free identifiers.
-    candidates.sort((a, b) => b.occurrences.length - a.occurrences.length ||
-      b.roughSaving - a.roughSaving);
+    // Highest projected byte-gain candidates get the shortest aliases.
+    sortForAliasAssignment(candidates);
     const aliases = allocateAliasNamesFresh(record, candidates.length);
     candidates.forEach((candidate, index) => { candidate.alias = aliases[index]; });
 
@@ -522,8 +534,7 @@ function chooseAliases(record, opts) {
   }
 
   // One final name assignment after the selected set stabilizes.
-  candidates.sort((a, b) => b.occurrences.length - a.occurrences.length ||
-    b.estimatedSaving - a.estimatedSaving);
+  sortForAliasAssignment(candidates);
   const aliases = allocateAliasNamesFresh(record, candidates.length);
   candidates.forEach((candidate, index) => {
     candidate.alias = aliases[index];
