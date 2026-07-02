@@ -35,6 +35,8 @@ Options:
   --max-aliases <n>       Maximum aliases per top-level function scope (default: 80)
   --array-min-items <n>   Minimum strings in an array before trying join/split (default: 6)
   --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
+  --object-unpacking      Enable object-array unpacking helper transform (default: off)
+  --no-object-unpacking   Disable object-array unpacking helper transform
   --assume-strict         Assume strict mode is safe and collapse repeated "use strict" directives
   --no-string-arrays      Disable string-array compaction
   --no-alias-globals      Do not alias safe built-ins such as Object or Array
@@ -60,6 +62,7 @@ function parseArgs(argv) {
     maxAliases: 80,
     arrayMinItems: 6,
     arrayMinSaving: 2,
+    objectUnpacking: false,
     assumeStrict: false,
     stringArrays: true,
     aliasGlobals: true,
@@ -79,6 +82,8 @@ function parseArgs(argv) {
     }
     if (arg === '--help') usage(0);
     if (arg === '--assume-strict') opts.assumeStrict = true;
+    else if (arg === '--object-unpacking') opts.objectUnpacking = true;
+    else if (arg === '--no-object-unpacking') opts.objectUnpacking = false;
     else if (arg === '--no-string-arrays') opts.stringArrays = false;
     else if (arg === '--no-alias-globals') opts.aliasGlobals = false;
     else if (arg === '--no-alias-undefined') opts.aliasUndefined = false;
@@ -170,6 +175,13 @@ function byteStats(text) {
   };
 }
 
+function getStaticObjectKeyName(keyNode) {
+  if (t.isIdentifier(keyNode)) return keyNode.name;
+  if (t.isStringLiteral(keyNode)) return keyNode.value;
+  if (t.isNumericLiteral(keyNode)) return String(keyNode.value);
+  return null;
+}
+
 function createUseStrictDirective() {
   return t.directive(t.directiveLiteral('use strict'));
 }
@@ -245,9 +257,21 @@ function getOutermostFunction(pathRef) {
   return outermost;
 }
 
-function isInRootBody(pathRef, rootPath) {
+function isInRootBody(pathRef, rootPath, allowOffsetless = true) {
   const body = rootPath.node.body;
-  if (!body || pathRef.node.start == null || body.start == null) return false;
+  if (!body) return false;
+
+  if (pathRef.node.start == null || body.start == null || pathRef.node.end == null || body.end == null) {
+    if (!allowOffsetless) return false;
+
+    let cursor = pathRef;
+    while (cursor) {
+      if (cursor.node === rootPath.node || cursor.node === body) return true;
+      cursor = cursor.parentPath;
+    }
+    return false;
+  }
+
   return pathRef.node.start >= body.start && pathRef.node.end <= body.end;
 }
 
@@ -409,8 +433,215 @@ function optimizeStringConcats(ast, report, minSaving = 1) {
   });
 }
 
+function analyzeObjectArrayUnpackCandidate(arrayNode) {
+  if (!t.isArrayExpression(arrayNode)) return null;
+  if (arrayNode.elements.length < 2) return null;
+  if (!arrayNode.elements.every((element) => t.isObjectExpression(element))) return null;
+
+  const firstObject = arrayNode.elements[0];
+  const keyOrder = [];
+  const seen = new Set();
+
+  for (const property of firstObject.properties) {
+    if (!t.isObjectProperty(property) || property.computed) return null;
+    const keyName = getStaticObjectKeyName(property.key);
+    if (!keyName || keyName === '__proto__' || seen.has(keyName)) return null;
+    seen.add(keyName);
+    keyOrder.push(keyName);
+  }
+
+  if (keyOrder.length === 0) return null;
+
+  const rows = [];
+  for (const objectElement of arrayNode.elements) {
+    if (!t.isObjectExpression(objectElement)) return null;
+    if (objectElement.properties.length !== keyOrder.length) return null;
+
+    const row = [];
+    for (let index = 0; index < keyOrder.length; index += 1) {
+      const property = objectElement.properties[index];
+      if (!t.isObjectProperty(property) || property.computed) return null;
+      const keyName = getStaticObjectKeyName(property.key);
+      if (keyName !== keyOrder[index] || keyName === '__proto__') return null;
+      row.push(t.cloneNode(property.value, true));
+    }
+    rows.push(row);
+  }
+
+  return {
+    keys: keyOrder,
+    rows
+  };
+}
+
+function allocateUnpackingHelperName(rootPath) {
+  const usedNames = collectUsedNames(rootPath);
+  for (const candidate of identifierNames()) {
+    if (!usedNames.has(candidate) && t.isValidIdentifier(candidate, true)) return candidate;
+  }
+
+  throw new Error('Could not allocate object-unpacking helper name');
+}
+
+function createUnpackingHelperDeclaration(helperName) {
+  const valuesId = t.identifier('values');
+  const keysId = t.identifier('keys');
+  const outId = t.identifier('out');
+  const valueId = t.identifier('value');
+  const indexId = t.identifier('index');
+
+  const keyOffsetExpression = () => t.binaryExpression(
+    '%',
+    t.cloneNode(indexId),
+    t.memberExpression(t.cloneNode(keysId), t.identifier('length'))
+  );
+
+  const objectSlotExpression = () => t.memberExpression(
+    t.cloneNode(outId),
+    t.binaryExpression(
+      '-',
+      t.memberExpression(t.cloneNode(outId), t.identifier('length')),
+      t.numericLiteral(1)
+    ),
+    true
+  );
+
+  const ensureRowExpression = t.logicalExpression(
+    '||',
+    keyOffsetExpression(),
+    t.callExpression(
+      t.memberExpression(t.cloneNode(outId), t.identifier('push')),
+      [t.objectExpression([])]
+    )
+  );
+
+  const assignExpression = t.assignmentExpression(
+    '=',
+    t.memberExpression(
+      objectSlotExpression(),
+      t.memberExpression(t.cloneNode(keysId), keyOffsetExpression(), true),
+      true
+    ),
+    t.cloneNode(valueId)
+  );
+
+  const reducer = t.arrowFunctionExpression(
+    [outId, valueId, indexId],
+    t.sequenceExpression([
+      ensureRowExpression,
+      assignExpression,
+      t.cloneNode(outId)
+    ])
+  );
+
+  const reduceCall = t.callExpression(
+    t.memberExpression(t.cloneNode(valuesId), t.identifier('reduce')),
+    [reducer, t.arrayExpression([])]
+  );
+
+  return t.variableDeclaration('const', [
+    t.variableDeclarator(
+      t.identifier(helperName),
+      t.arrowFunctionExpression([valuesId, t.restElement(keysId)], reduceCall)
+    )
+  ]);
+}
+
+function buildObjectUnpackCall(helperName, keys, rows) {
+  const flatValues = [];
+  for (const row of rows) {
+    for (const value of row) flatValues.push(t.cloneNode(value, true));
+  }
+
+  return t.callExpression(
+    t.identifier(helperName),
+    [
+      t.arrayExpression(flatValues),
+      ...keys.map((key) => t.stringLiteral(key))
+    ]
+  );
+}
+
+function optimizeObjectArrayUnpacking(ast, report) {
+  const records = new Map();
+  let candidateCount = 0;
+
+  traverse(ast, {
+    ArrayExpression: {
+      exit(arrayPath) {
+        const analysis = analyzeObjectArrayUnpackCandidate(arrayPath.node);
+        if (!analysis) return;
+
+        const rootPath = getOutermostFunction(arrayPath);
+        if (!rootPath || !isInRootBody(arrayPath, rootPath)) return;
+
+        let record = records.get(rootPath.node);
+        if (!record) {
+          record = { rootPath, candidates: [] };
+          records.set(rootPath.node, record);
+        }
+
+        candidateCount += 1;
+        record.candidates.push({
+          path: arrayPath,
+          keys: analysis.keys,
+          rows: analysis.rows,
+          location: arrayPath.node.loc?.start || null
+        });
+      }
+    }
+  });
+
+  report.objectUnpackSummary.candidates = candidateCount;
+
+  for (const record of records.values()) {
+    const helperName = allocateUnpackingHelperName(record.rootPath);
+    const helperDeclaration = createUnpackingHelperDeclaration(helperName);
+    const helperBytes = codeByteLength(minifiedNode(helperDeclaration));
+    const rewritten = [];
+    let localSavings = 0;
+
+    for (const candidate of record.candidates) {
+      if (!candidate.path || candidate.path.removed) continue;
+
+      const replacement = buildObjectUnpackCall(helperName, candidate.keys, candidate.rows);
+      const before = codeByteLength(minifiedNode(candidate.path.node));
+      const after = codeByteLength(minifiedNode(replacement));
+      const saving = before - after;
+      if (saving <= 0) continue;
+
+      rewritten.push({ candidate, replacement, before, after, saving });
+      localSavings += saving;
+    }
+
+    if (!rewritten.length) continue;
+
+    const netSaving = localSavings - helperBytes;
+
+    insertDeclaration(record.rootPath, helperDeclaration);
+    report.objectUnpackSummary.helpersInserted += 1;
+    report.objectUnpackSummary.helperBytes += helperBytes;
+    report.objectUnpackSummary.netRawSaving += netSaving;
+
+    for (const item of rewritten) {
+      item.candidate.path.replaceWith(item.replacement);
+      report.objectUnpackSummary.rewritten += 1;
+      report.objectUnpacks.push({
+        helper: helperName,
+        keys: item.candidate.keys,
+        items: item.candidate.rows.length,
+        before: item.before,
+        after: item.after,
+        saving: item.saving,
+        location: item.candidate.location
+      });
+    }
+  }
+}
+
 function collectCandidates(ast, opts) {
   const scopeMap = new Map();
+  const allowOffsetless = Boolean(opts.objectUnpacking);
 
   traverse(ast, {
     StringLiteral(stringPath) {
@@ -419,7 +650,7 @@ function collectCandidates(ast, opts) {
           isStaticModuleSpecifier(stringPath) || isInsideJsx(stringPath)) return;
 
       const rootPath = getOutermostFunction(stringPath);
-      if (!rootPath || !isInRootBody(stringPath, rootPath)) return;
+      if (!rootPath || !isInRootBody(stringPath, rootPath, allowOffsetless)) return;
 
       const value = stringPath.node.value;
       if (value.length === 0) return;
@@ -435,7 +666,7 @@ function collectCandidates(ast, opts) {
     MemberExpression(memberPath) {
       if (!opts.aliasProperties || memberPath.node.computed || !t.isIdentifier(memberPath.node.property)) return;
       const rootPath = getOutermostFunction(memberPath);
-      if (!rootPath || !isInRootBody(memberPath, rootPath)) return;
+      if (!rootPath || !isInRootBody(memberPath, rootPath, allowOffsetless)) return;
 
       const value = memberPath.node.property.name;
       const record = getScopeRecord(scopeMap, rootPath);
@@ -450,7 +681,7 @@ function collectCandidates(ast, opts) {
     OptionalMemberExpression(memberPath) {
       if (!opts.aliasProperties || memberPath.node.computed || !t.isIdentifier(memberPath.node.property)) return;
       const rootPath = getOutermostFunction(memberPath);
-      if (!rootPath || !isInRootBody(memberPath, rootPath)) return;
+      if (!rootPath || !isInRootBody(memberPath, rootPath, allowOffsetless)) return;
 
       const value = memberPath.node.property.name;
       const record = getScopeRecord(scopeMap, rootPath);
@@ -484,7 +715,7 @@ function collectCandidates(ast, opts) {
       if (identifierPath.scope.getBinding(name)) return;
 
       const rootPath = getOutermostFunction(identifierPath);
-      if (!rootPath || !isInRootBody(identifierPath, rootPath)) return;
+      if (!rootPath || !isInRootBody(identifierPath, rootPath, allowOffsetless)) return;
 
       const record = getScopeRecord(scopeMap, rootPath);
 
@@ -515,7 +746,7 @@ function collectCandidates(ast, opts) {
       if (!t.isNumericLiteral(unaryPath.node.argument, { value: 0 })) return;
 
       const rootPath = getOutermostFunction(unaryPath);
-      if (!rootPath || !isInRootBody(unaryPath, rootPath)) return;
+      if (!rootPath || !isInRootBody(unaryPath, rootPath, allowOffsetless)) return;
 
       const record = getScopeRecord(scopeMap, rootPath);
       addOccurrence(record, 'u:undefined', 'undefined', 'undefined', {
@@ -549,7 +780,7 @@ function collectPropertyKey(propertyPath, scopeMap, opts) {
 
   if (value === '__proto__') return;
   const rootPath = getOutermostFunction(propertyPath);
-  if (!rootPath || !isInRootBody(propertyPath, rootPath)) return;
+  if (!rootPath || !isInRootBody(propertyPath, rootPath, opts.objectUnpacking)) return;
 
   const record = getScopeRecord(scopeMap, rootPath);
   addOccurrence(record, `s:${value}`, 'string', value, {
@@ -848,12 +1079,20 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
     options: { ...runOpts, positional: undefined, inputFile: undefined, outputFile: undefined },
     stringArrays: [],
     stringConcats: [],
+    objectUnpacks: [],
     aliases: [],
     before: beforeStats,
     after: null,
     savings: null,
     arrayCompaction: null,
     concatCompaction: null,
+    objectUnpackSummary: {
+      candidates: 0,
+      rewritten: 0,
+      helpersInserted: 0,
+      helperBytes: 0,
+      netRawSaving: 0
+    },
     strictNormalization: {
       enabled: runOpts.assumeStrict,
       removed: 0,
@@ -864,6 +1103,7 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
   if (runOpts.assumeStrict) normalizeStrictDirectives(ast, report);
   compactStringArrays(ast, runOpts, report);
   if (stringConcatsEnabled) optimizeStringConcats(ast, report, stringConcatMinSaving);
+  if (runOpts.objectUnpacking) optimizeObjectArrayUnpacking(ast, report);
   const scopeMap = collectCandidates(ast, runOpts);
   applyAliases(scopeMap, runOpts, report);
   const output = await printCode(ast, runOpts);
@@ -957,6 +1197,7 @@ async function main() {
   const concatLine = report.concatCompaction.attempted && !report.concatCompaction.selected
     ? `String concatenations rewritten: 0 (skipped: no net compressed gain)`
     : `String concatenations rewritten: ${report.stringConcats.length}`;
+  const unpackLine = `Object arrays unpacked: ${report.objectUnpackSummary.rewritten}`;
   const strictLine = report.strictNormalization.enabled
     ? `Strict directives normalized: removed ${report.strictNormalization.removed}, inserted ${report.strictNormalization.inserted}`
     : null;
@@ -965,6 +1206,7 @@ async function main() {
     `Wrote ${opts.outputFile}`,
     arrayLine,
     concatLine,
+    unpackLine,
     `Aliases inserted: ${report.aliases.length}`,
     `Raw:    ${beforeStats.raw} -> ${afterStats.raw}  saved ${report.savings.raw} (${percent(report.savings.raw, beforeStats.raw)})`,
     `Gzip:   ${beforeStats.gzip} -> ${afterStats.gzip}  saved ${report.savings.gzip} (${percent(report.savings.gzip, beforeStats.gzip)})`,

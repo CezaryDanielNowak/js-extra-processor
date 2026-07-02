@@ -7,6 +7,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { execFileSync } = require('node:child_process');
 const { parse } = require('@babel/parser');
+const traverse = require('@babel/traverse').default;
+const t = require('@babel/types');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-extra-compressor-'));
 const inputFile = path.join(tempDir, 'input.js');
@@ -204,6 +206,126 @@ assert.equal(strictReport.strictNormalization.inserted, 1);
 assert.ok(strictReport.strictNormalization.removed >= 2,
   'expected assume-strict pass to remove nested strict directives');
 assert.equal(strictReportNoAssume.strictNormalization.enabled, false);
+
+const objectUnpackSource = `
+(function(){
+  const o = [{index:7,amount:15},{index:6,amount:25},{index:5,amount:30},{index:5,amount:45}];
+  globalThis.__optimizerResult = { o };
+})();
+`;
+const objectUnpackInputFile = path.join(tempDir, 'object-unpack-input.js');
+const objectUnpackOutputFile = path.join(tempDir, 'object-unpack-output.js');
+const objectUnpackReportFile = path.join(tempDir, 'object-unpack-report.json');
+const objectUnpackOutputDisabledFile = path.join(tempDir, 'object-unpack-output-disabled.js');
+const objectUnpackReportDisabledFile = path.join(tempDir, 'object-unpack-report-disabled.json');
+
+fs.writeFileSync(objectUnpackInputFile, objectUnpackSource);
+execFileSync(process.execPath, [
+  cliPath,
+  objectUnpackInputFile,
+  objectUnpackOutputFile,
+  '--object-unpacking',
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--report', objectUnpackReportFile
+], { stdio: 'inherit' });
+
+execFileSync(process.execPath, [
+  cliPath,
+  objectUnpackInputFile,
+  objectUnpackOutputDisabledFile,
+  '--no-object-unpacking',
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--report', objectUnpackReportDisabledFile
+], { stdio: 'inherit' });
+
+const objectUnpackOutput = fs.readFileSync(objectUnpackOutputFile, 'utf8');
+const objectUnpackOutputDisabled = fs.readFileSync(objectUnpackOutputDisabledFile, 'utf8');
+const objectUnpackReport = JSON.parse(fs.readFileSync(objectUnpackReportFile, 'utf8'));
+const objectUnpackReportDisabled = JSON.parse(fs.readFileSync(objectUnpackReportDisabledFile, 'utf8'));
+
+assert.deepEqual(execute(objectUnpackOutput), execute(objectUnpackSource));
+assert.deepEqual(execute(objectUnpackOutputDisabled), execute(objectUnpackSource));
+assert.ok(objectUnpackReport.objectUnpackSummary.candidates >= 1,
+  'expected repeated-key object arrays to be detected');
+assert.ok(objectUnpackReport.objectUnpackSummary.rewritten >= 1,
+  'expected object-array unpacking helper rewrite to be applied');
+const objectUnpackHelperName = objectUnpackReport.objectUnpacks[0]?.helper;
+assert.ok(typeof objectUnpackHelperName === 'string' && objectUnpackHelperName.length > 0,
+  'expected transformed output report to include unpacking helper variable name');
+assert.ok(objectUnpackOutput.includes(`const ${objectUnpackHelperName}=`),
+  'expected transformed output to include unpacking helper declaration');
+
+const objectUnpackAst = parse(objectUnpackOutput, { sourceType: 'script' });
+let unpackingCallHasFlatPayload = false;
+traverse(objectUnpackAst, {
+  CallExpression(callPath) {
+    if (!t.isIdentifier(callPath.node.callee)) return;
+    if (callPath.node.callee.name !== objectUnpackHelperName) return;
+    if (!callPath.node.arguments.length) return;
+    const [firstArg] = callPath.node.arguments;
+    if (!t.isArrayExpression(firstArg)) return;
+    if (!firstArg.elements.every((element) => !t.isArrayExpression(element))) return;
+    unpackingCallHasFlatPayload = true;
+  }
+});
+assert.ok(unpackingCallHasFlatPayload,
+  'expected object unpacking helper call to use a flat values payload array');
+
+assert.equal(objectUnpackReportDisabled.objectUnpackSummary.rewritten, 0,
+  'expected --no-object-unpacking to disable helper rewrites');
+assert.ok(!objectUnpackOutputDisabled.includes(`const ${objectUnpackHelperName}=`),
+  'expected no helper declaration when object-array unpacking is disabled');
+
+const transformedAliasSource = `
+(function(){
+  const rows = [
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" },
+    { kind: "default", label: "default" }
+  ];
+  globalThis.__optimizerResult = { rows };
+})();
+`;
+const transformedAliasInputFile = path.join(tempDir, 'transformed-alias-input.js');
+const transformedAliasOutputFile = path.join(tempDir, 'transformed-alias-output.js');
+const transformedAliasReportFile = path.join(tempDir, 'transformed-alias-report.json');
+
+fs.writeFileSync(transformedAliasInputFile, transformedAliasSource);
+execFileSync(process.execPath, [
+  cliPath,
+  transformedAliasInputFile,
+  transformedAliasOutputFile,
+  '--object-unpacking',
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-undefined',
+  '--min-occurrences', '2',
+  '--min-saving', '0',
+  '--report', transformedAliasReportFile
+], { stdio: 'inherit' });
+
+const transformedAliasOutput = fs.readFileSync(transformedAliasOutputFile, 'utf8');
+const transformedAliasReport = JSON.parse(fs.readFileSync(transformedAliasReportFile, 'utf8'));
+
+assert.deepEqual(execute(transformedAliasOutput), execute(transformedAliasSource));
+assert.ok(transformedAliasReport.objectUnpackSummary.rewritten >= 1,
+  'expected object-array unpacking to rewrite transformed-alias fixture');
+assert.ok(transformedAliasReport.aliases.some((entry) => entry.value === 'default' && entry.type === 'string'),
+  'expected alias collection to include repeated strings introduced by earlier transforms');
 
 const concatSource = `
 (function(){

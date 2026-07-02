@@ -25,6 +25,8 @@ Example input file: 1 860 426 bytes
 Measured on `widget-v1-en-before.js` with current code.
 Updated after benchmark runs.
 
+All values in these tables are measured with default options (object-array unpacking disabled unless `--object-unpacking` is explicitly passed).
+
 ### With string-array compaction
 
 | max-aliases | Raw saving | Gzip saving | Brotli saving |
@@ -57,53 +59,49 @@ That is the usual setup: **UglifyJS first, extra compressor second**.
 
 ## What it actually does
 
-The compressor currently knows three useful tricks:
+The compressor currently applies six optimization points:
 
-1. **Aliases repeated strings, property names, and safe global objects**
-2. **Compacts large arrays of strings using a joined string and `.split()`**
-3. **Rewrites some string concatenations into template literals when that is shorter, then keeps the rewrite only when compressed output stays favorable**
-
-It can also alias repeated `undefined` and `void 0` values by default; disable with `--no-alias-undefined`.
-
-If your bundle is already strict-safe, `--assume-strict` can collapse repeated `"use strict"` directives into a single top-level directive.
+1. **Alias repeated strings, property names, and safe global objects**
+2. **Compact large string arrays using a joined string and `.split()`**
+3. **Rewrite selected string concatenations into template literals (guarded by compressed-size checks)**
+4. **Rewrite repeated-key object arrays to an unpacking helper call (opt-in via `--object-unpacking`)**
+5. **Alias repeated `undefined` and `void 0` values (disable with `--no-alias-undefined`)**
+6. **Collapse repeated `"use strict"` directives into one top-level directive (opt-in via `--assume-strict`)**
 
 It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
 
-## Tiny example, big ambitions
+### 1. Alias repeated strings, property names, and safe global objects
 
-Repeated values such as:
+Before:
 
 ```js
-Object.defineProperty(exports, "__esModule", {
-  value: true
-});
-
+Object.defineProperty(exports, "__esModule", { value: true });
 component.componentDidMount();
 component.componentWillUnmount();
 component.render();
 ```
 
-may be transformed into code conceptually similar to:
+After:
 
 ```js
 const a = Object;
 const b = "defineProperty";
-const c = "exports";
-const d = "__esModule";
-const e = "componentDidMount";
-const f = "componentWillUnmount";
-const g = "render";
+const c = "__esModule";
+const d = "componentDidMount";
+const e = "componentWillUnmount";
+const f = "render";
 
-a[b][c];
+a[b](exports, c, { value: true });
+component[d]();
+component[e]();
+component[f]();
 ```
 
-The real output is generated from the JavaScript AST and uses short, collision-free variable names. No regex archaeology involved.
+Aliases are inserted only inside an existing outer function scope. The tool intentionally does not add variables to the global scope.
 
-The aliases are inserted only inside an existing outer function scope. The tool intentionally does not add variables to the global scope.
+### 2. Compact large string arrays using `.split()`
 
-## String-array compaction: the `.split()` trick
-
-A long array containing only strings can be rewritten from:
+Before:
 
 ```js
 const VALUES = [
@@ -114,7 +112,7 @@ const VALUES = [
 ];
 ```
 
-to:
+After:
 
 ```js
 const VALUES =
@@ -122,7 +120,108 @@ const VALUES =
     .split("!");
 ```
 
-The tool automatically chooses a delimiter that does not occur in any array item and applies the transformation only when it reduces the raw output size by the configured minimum.
+The delimiter is chosen automatically so it does not appear in any array item.
+
+### 3. Rewrite selected string concatenations into template literals
+
+Before:
+
+```js
+const message = "User " + id + " has " + count + " items.";
+const message2 = "User " + nextId + " has " + count + " items.";
+```
+
+After:
+
+```js
+const message = `User ${id} has ${count} items.`;
+const message2 = `User ${nextId} has ${count} items.`;
+```
+
+This rewrite is guarded by compressed-size checks, so it is kept only when gzip/brotli results stay favorable.
+
+### 4. Rewrite repeated-key object arrays to an unpacking helper call (opt-in)
+
+Object-array unpacking is disabled by default. Enable it with `--object-unpacking`.
+
+Before:
+
+```js
+const rows = [
+  { index: 7, amount: 15 },
+  { index: 6, amount: 25 },
+  { index: 5, amount: 30 }
+];
+```
+
+After:
+
+```js
+const $ = (values, ...keys) =>
+  values.reduce((out, value, i) => {
+    i % keys.length || out.push({});
+    out[out.length - 1][keys[i % keys.length]] = value;
+    return out;
+  }, []);
+
+const rows = $([7, 15, 6, 25, 5, 30], "index", "amount");
+```
+
+The helper name is generated dynamically with collision checks and kept as short as possible.
+
+Note: for my bundles, RAW saving was significant but Brotli result could be significantly worse, so keep this mode opt-in.
+
+### 5. Alias repeated `undefined` and `void 0` values
+
+Before:
+
+```js
+const a = undefined;
+const b = void 0;
+const c = undefined;
+const d = void 0;
+```
+
+After:
+
+```js
+const a = void 0;
+const b = a;
+const c = a;
+const d = a;
+```
+
+This optimization is enabled by default; disable it with `--no-alias-undefined`.
+
+### 6. Collapse repeated `"use strict"` directives (opt-in)
+
+Before:
+
+```js
+"use strict";
+function first(v) {
+  "use strict";
+  return v + 1;
+}
+function second(v) {
+  "use strict";
+  return first(v) + 1;
+}
+```
+
+After:
+
+```js
+"use strict";
+function first(v) {
+  return v + 1;
+}
+function second(v) {
+  return first(v) + 1;
+}
+```
+
+Use `--assume-strict` only when your bundle is strict-safe.
 
 ## Working together with UglifyJS
 
