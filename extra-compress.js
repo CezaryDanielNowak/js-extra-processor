@@ -32,7 +32,7 @@ Usage:
 Options:
   --min-occurrences <n>   Minimum occurrences for an alias (default: 4)
   --min-saving <n>        Minimum estimated raw-byte saving per alias (default: 2)
-  --max-aliases <n>       Maximum aliases per top-level function scope (default: 80)
+  --max-aliases <n>       Maximum aliases per top-level function scope (default: 160)
   --array-min-items <n>   Minimum strings in an array before trying join/split (default: 6)
   --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
   --object-unpacking      Enable object-array unpacking helper transform (default: off)
@@ -59,7 +59,7 @@ function parseArgs(argv) {
   const opts = {
     minOccurrences: 4,
     minSaving: 2,
-    maxAliases: 80,
+    maxAliases: 160,
     arrayMinItems: 6,
     arrayMinSaving: 2,
     objectUnpacking: false,
