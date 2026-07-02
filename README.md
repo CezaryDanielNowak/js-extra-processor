@@ -23,23 +23,24 @@ It is intentionally a **semi-private utility**, not a polished general-purpose m
 Example input file: 1 860 426 bytes
 
 Measured on `widget-v1-en-before.js` with current code.
+Updated after benchmark runs.
 
 ### With string-array compaction
 
 | max-aliases | Raw saving | Gzip saving | Brotli saving |
 | --- | --- | --- | --- |
-| 80  | 160 898 bytes / 8.648% | 6 298 bytes / 1.238% | 2 233 bytes / 0.563% |
-| 120 | 178 060 bytes / 9.571% | 6 929 bytes / 1.363% | 2 271 bytes / 0.573% |
+| 80  | 160 921 bytes / 8.650% | 6 285 bytes / 1.236% | 2 454 bytes / 0.619% |
+| 120 | 178 083 bytes / 9.572% | 6 916 bytes / 1.360% | 2 318 bytes / 0.585% |
 | 160 | 191 610 bytes / 10.299% | 7 347 bytes / 1.445% | 2 392 bytes / 0.603% |
-| 200 | 202 928 bytes / 10.908% | 7 822 bytes / 1.538% | 2 357 bytes / 0.595% |
+| 200 | 202 951 bytes / 10.909% | 7 808 bytes / 1.535% | 2 459 bytes / 0.620% |
 | 240 | 212 369 bytes / 11.415% | 8 253 bytes / 1.623% | 2 465 bytes / 0.622% |
 
 ### With `--no-string-arrays`
 
 | max-aliases | Raw saving | Gzip saving | Brotli saving |
 | --- | --- | --- | --- |
-| 80  | 159 566 bytes / 8.577% | 6 708 bytes / 1.319% | 2 208 bytes / 0.557% |
-| 120 | 176 966 bytes / 9.512% | 7 471 bytes / 1.469% | 2 459 bytes / 0.620% |
+| 80  | 159 589 bytes / 8.578% | 6 693 bytes / 1.316% | 2 393 bytes / 0.604% |
+| 120 | 176 989 bytes / 9.513% | 7 461 bytes / 1.467% | 2 562 bytes / 0.646% |
 | 160 | 190 640 bytes / 10.247% | 7 620 bytes / 1.498% | 2 439 bytes / 0.615% |
 | 200 | 202 052 bytes / 10.861% | 8 174 bytes / 1.607% | 2 575 bytes / 0.650% |
 | 240 | 211 624 bytes / 11.375% | 8 500 bytes / 1.671% | 2 343 bytes / 0.591% |
@@ -56,10 +57,11 @@ That is the usual setup: **UglifyJS first, extra compressor second**.
 
 ## What it actually does
 
-The compressor currently knows two useful tricks:
+The compressor currently knows three useful tricks:
 
 1. **Aliases repeated strings, property names, and safe global objects**
 2. **Compacts large arrays of strings using a joined string and `.split()`**
+3. **Rewrites some string concatenations into template literals when that is shorter, then keeps the rewrite only when compressed output stays favorable**
 
 It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
 

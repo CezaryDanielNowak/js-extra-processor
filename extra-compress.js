@@ -270,6 +270,101 @@ function compactStringArrays(ast, opts, report) {
   });
 }
 
+function flattenPlusChain(node) {
+  const terms = [];
+  let cursor = node;
+  while (t.isBinaryExpression(cursor, { operator: '+' })) {
+    terms.push(cursor.right);
+    cursor = cursor.left;
+  }
+  terms.push(cursor);
+  terms.reverse();
+  return terms;
+}
+
+function countBackslashes(text) {
+  return (text.match(/\\/g) || []).length;
+}
+
+function templateRawText(value) {
+  return JSON.stringify(value)
+    .slice(1, -1)
+    .replace(/`/g, '\\`')
+    .replace(/\$\{/g, '\\${');
+}
+
+function buildTemplateLiteralFromConcat(terms) {
+  if (!terms.length || !t.isStringLiteral(terms[0])) return null;
+
+  let currentText = terms[0].value;
+  const quasis = [];
+  const expressions = [];
+
+  for (let i = 1; i < terms.length; i += 1) {
+    const term = terms[i];
+    if (t.isStringLiteral(term)) {
+      currentText += term.value;
+      continue;
+    }
+
+    quasis.push(t.templateElement({
+      raw: templateRawText(currentText),
+      cooked: currentText
+    }, false));
+    expressions.push(t.cloneNode(term, true));
+    currentText = '';
+  }
+
+  if (!expressions.length) return null;
+
+  quasis.push(t.templateElement({
+    raw: templateRawText(currentText),
+    cooked: currentText
+  }, true));
+  return t.templateLiteral(quasis, expressions);
+}
+
+function optimizeStringConcats(ast, report, minSaving = 1) {
+  traverse(ast, {
+    BinaryExpression: {
+      exit(binaryPath) {
+        if (binaryPath.node.operator !== '+') return;
+
+        const parent = binaryPath.parentPath;
+        if (parent && parent.isBinaryExpression({ operator: '+' }) && parent.node.left === binaryPath.node) {
+          return;
+        }
+
+        const terms = flattenPlusChain(binaryPath.node);
+  if (terms.length <= 2) return;
+
+        const replacement = buildTemplateLiteralFromConcat(terms);
+        if (!replacement) return;
+        if (replacement.expressions.length <= 1) return;
+
+  const beforeCode = minifiedNode(binaryPath.node);
+  const afterCode = minifiedNode(replacement);
+  if (countBackslashes(afterCode) > countBackslashes(beforeCode)) return;
+
+  const before = codeByteLength(beforeCode);
+  const after = codeByteLength(afterCode);
+        const saving = before - after;
+        if (saving < minSaving) return;
+        const location = binaryPath.node.loc?.start || null;
+
+        binaryPath.replaceWith(replacement);
+        report.stringConcats.push({
+          terms: terms.length,
+          before,
+          after,
+          saving,
+          location
+        });
+      }
+    }
+  });
+}
+
 function collectCandidates(ast, opts) {
   const scopeMap = new Map();
 
@@ -659,7 +754,14 @@ function isSmallerBundle(a, b) {
   return a.brotli <= b.brotli;
 }
 
-async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled) {
+function isSmallerCompressedBundle(a, b) {
+  const aCompressed = a.gzip + a.brotli;
+  const bCompressed = b.gzip + b.brotli;
+  if (aCompressed !== bCompressed) return aCompressed < bCompressed;
+  return a.raw <= b.raw;
+}
+
+async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, stringConcatsEnabled, stringConcatMinSaving = 1) {
   const runOpts = { ...opts, stringArrays: stringArraysEnabled };
   const ast = parseCode(input, opts.inputFile);
   const report = {
@@ -667,14 +769,17 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled) {
     output: opts.outputFile,
     options: { ...runOpts, positional: undefined, inputFile: undefined, outputFile: undefined },
     stringArrays: [],
+    stringConcats: [],
     aliases: [],
     before: beforeStats,
     after: null,
     savings: null,
-    arrayCompaction: null
+    arrayCompaction: null,
+    concatCompaction: null
   };
 
   compactStringArrays(ast, runOpts, report);
+  if (stringConcatsEnabled) optimizeStringConcats(ast, report, stringConcatMinSaving);
   const scopeMap = collectCandidates(ast, runOpts);
   applyAliases(scopeMap, runOpts, report);
   const output = await printCode(ast, runOpts);
@@ -693,6 +798,33 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled) {
   return { output, report, afterStats };
 }
 
+async function optimizeWithConcatGuard(input, opts, beforeStats, stringArraysEnabled) {
+  const withConcatsLoose = await optimizeOnce(input, opts, beforeStats, stringArraysEnabled, true, 1);
+  const withConcatsStrict = await optimizeOnce(input, opts, beforeStats, stringArraysEnabled, true, 4);
+  const withoutConcats = await optimizeOnce(input, opts, beforeStats, stringArraysEnabled, false, 1);
+  const bestConcatVariant = isSmallerCompressedBundle(withConcatsStrict.afterStats, withConcatsLoose.afterStats)
+    ? withConcatsStrict
+    : withConcatsLoose;
+
+  const candidateCount = bestConcatVariant.report.stringConcats.length;
+  const attempted = candidateCount > 0;
+  const keepConcats = attempted && isSmallerCompressedBundle(bestConcatVariant.afterStats, withoutConcats.afterStats);
+  const chosen = keepConcats ? bestConcatVariant : withoutConcats;
+  const minSavingUsed = bestConcatVariant === withConcatsStrict ? 4 : 1;
+
+  chosen.report.concatCompaction = {
+    attempted,
+    selected: keepConcats,
+    candidateCount,
+    minSavingUsed,
+    rawDiffVsNoConcats: withoutConcats.afterStats.raw - bestConcatVariant.afterStats.raw,
+    gzipDiffVsNoConcats: withoutConcats.afterStats.gzip - bestConcatVariant.afterStats.gzip,
+    brotliDiffVsNoConcats: withoutConcats.afterStats.brotli - bestConcatVariant.afterStats.brotli
+  };
+
+  return chosen;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const input = fs.readFileSync(opts.inputFile, 'utf8');
@@ -700,8 +832,8 @@ async function main() {
   let chosen;
 
   if (opts.stringArrays) {
-    const withArrays = await optimizeOnce(input, opts, beforeStats, true);
-    const withoutArrays = await optimizeOnce(input, opts, beforeStats, false);
+    const withArrays = await optimizeWithConcatGuard(input, opts, beforeStats, true);
+    const withoutArrays = await optimizeWithConcatGuard(input, opts, beforeStats, false);
     const keepArrays = isSmallerBundle(withArrays.afterStats, withoutArrays.afterStats);
 
     chosen = keepArrays ? withArrays : withoutArrays;
@@ -714,7 +846,7 @@ async function main() {
       brotliDiffVsNoArrays: withoutArrays.afterStats.brotli - withArrays.afterStats.brotli
     };
   } else {
-    chosen = await optimizeOnce(input, opts, beforeStats, false);
+    chosen = await optimizeWithConcatGuard(input, opts, beforeStats, false);
     chosen.report.arrayCompaction = {
       attempted: false,
       selected: false,
@@ -738,9 +870,13 @@ async function main() {
   const arrayLine = report.arrayCompaction.attempted && !report.arrayCompaction.selected
     ? `String arrays compacted: 0 (skipped: no net bundle gain)`
     : `String arrays compacted: ${report.stringArrays.length}`;
+  const concatLine = report.concatCompaction.attempted && !report.concatCompaction.selected
+    ? `String concatenations rewritten: 0 (skipped: no net compressed gain)`
+    : `String concatenations rewritten: ${report.stringConcats.length}`;
   process.stdout.write([
     `Wrote ${opts.outputFile}`,
     arrayLine,
+    concatLine,
     `Aliases inserted: ${report.aliases.length}`,
     `Raw:    ${beforeStats.raw} -> ${afterStats.raw}  saved ${report.savings.raw} (${percent(report.savings.raw, beforeStats.raw)})`,
     `Gzip:   ${beforeStats.gzip} -> ${afterStats.gzip}  saved ${report.savings.gzip} (${percent(report.savings.gzip, beforeStats.gzip)})`,

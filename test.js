@@ -74,7 +74,87 @@ assert.deepEqual(execute(output), execute(source));
 assert.ok(report.stringArrays.length >= 1, 'expected at least one compacted string array');
 assert.ok(report.aliases.some((entry) => entry.value === 'default'));
 assert.ok(report.aliases.some((entry) => entry.value === 'Object'));
+assert.equal(report.concatCompaction.attempted, false,
+  'fixtures without concat opportunities should not attempt concat compaction');
+assert.equal(report.concatCompaction.selected, false,
+  'concat compaction should not be selected when no candidates exist');
 assert.ok(Buffer.byteLength(output) < Buffer.byteLength(source));
+
+const concatSource = `
+(function(){
+  const variable = 41;
+  const extra = 2;
+  const phrases = [
+    "First " + variable + " and " + extra + ".",
+    "First " + (variable + 1) + " and " + extra + ".",
+    "First " + (variable + 2) + " and " + extra + "."
+  ];
+  globalThis.__optimizerResult = { phrases };
+})();
+`;
+const concatInputFile = path.join(tempDir, 'concat-input.js');
+const concatOutputFile = path.join(tempDir, 'concat-output.js');
+const concatReportFile = path.join(tempDir, 'concat-report.json');
+
+fs.writeFileSync(concatInputFile, concatSource);
+execFileSync(process.execPath, [
+  cliPath,
+  concatInputFile,
+  concatOutputFile,
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--report', concatReportFile
+], { stdio: 'inherit' });
+
+const concatOutput = fs.readFileSync(concatOutputFile, 'utf8');
+const concatReport = JSON.parse(fs.readFileSync(concatReportFile, 'utf8'));
+assert.deepEqual(execute(concatOutput), execute(concatSource));
+assert.equal(concatReport.concatCompaction.attempted, true,
+  'expected concat compaction guard to run on concat-heavy fixtures');
+assert.equal(concatReport.concatCompaction.selected, true,
+  'expected concat compaction guard to keep rewrites when compressed result is better');
+assert.ok(concatReport.stringConcats.length >= 1,
+  'expected at least one concatenation rewritten to template literal');
+assert.equal(concatReport.concatCompaction.candidateCount, concatReport.stringConcats.length,
+  'selected concat rewrites should match candidate count');
+assert.ok(concatReport.stringConcats.every((entry) => entry.saving > 0),
+  'all concatenation rewrites should have positive local raw-byte savings');
+assert.ok(concatOutput.includes('`'),
+  'expected optimized output to include a template literal');
+
+const concatSkipSource = `
+(function(){
+  const variable = 7;
+  const single = "Single " + variable;
+  const withBacktick = "Tick \` " + variable + ".";
+  globalThis.__optimizerResult = { single, withBacktick };
+})();
+`;
+const concatSkipInputFile = path.join(tempDir, 'concat-skip-input.js');
+const concatSkipOutputFile = path.join(tempDir, 'concat-skip-output.js');
+const concatSkipReportFile = path.join(tempDir, 'concat-skip-report.json');
+
+fs.writeFileSync(concatSkipInputFile, concatSkipSource);
+execFileSync(process.execPath, [
+  cliPath,
+  concatSkipInputFile,
+  concatSkipOutputFile,
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--report', concatSkipReportFile
+], { stdio: 'inherit' });
+
+const concatSkipOutput = fs.readFileSync(concatSkipOutputFile, 'utf8');
+const concatSkipReport = JSON.parse(fs.readFileSync(concatSkipReportFile, 'utf8'));
+assert.deepEqual(execute(concatSkipOutput), execute(concatSkipSource));
+assert.equal(concatSkipReport.concatCompaction.attempted, false,
+  'single-concat and backslash-increasing cases should not be considered candidates');
+assert.equal(concatSkipReport.stringConcats.length, 0,
+  'single-concat and backslash-increasing cases must remain unreplaced');
 
 const ast = parse(output, { sourceType: 'script' });
 assert.ok(!ast.program.body.some((node) => node.type === 'VariableDeclaration'),
