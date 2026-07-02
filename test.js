@@ -139,6 +139,72 @@ assert.ok(undefinedReport.aliases.some((entry) => entry.type === 'undefined'),
 assert.ok(!undefinedReportNoAlias.aliases.some((entry) => entry.type === 'undefined'),
   'expected --no-alias-undefined to disable undefined/void 0 aliasing');
 
+const strictSource = `
+(function(){
+  "use strict";
+  function first(value) {
+    "use strict";
+    return value + 1;
+  }
+  function second(value) {
+    "use strict";
+    return first(value) + 1;
+  }
+  globalThis.__optimizerResult = { value: second(3) };
+})();
+`;
+const strictInputFile = path.join(tempDir, 'strict-input.js');
+const strictOutputFile = path.join(tempDir, 'strict-output.js');
+const strictReportFile = path.join(tempDir, 'strict-report.json');
+const strictOutputNoAssumeFile = path.join(tempDir, 'strict-output-no-assume.js');
+const strictReportNoAssumeFile = path.join(tempDir, 'strict-report-no-assume.json');
+
+fs.writeFileSync(strictInputFile, strictSource);
+execFileSync(process.execPath, [
+  cliPath,
+  strictInputFile,
+  strictOutputFile,
+  '--assume-strict',
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--report', strictReportFile
+], { stdio: 'inherit' });
+
+execFileSync(process.execPath, [
+  cliPath,
+  strictInputFile,
+  strictOutputNoAssumeFile,
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--report', strictReportNoAssumeFile
+], { stdio: 'inherit' });
+
+const strictOutput = fs.readFileSync(strictOutputFile, 'utf8');
+const strictOutputNoAssume = fs.readFileSync(strictOutputNoAssumeFile, 'utf8');
+const strictReport = JSON.parse(fs.readFileSync(strictReportFile, 'utf8'));
+const strictReportNoAssume = JSON.parse(fs.readFileSync(strictReportNoAssumeFile, 'utf8'));
+
+assert.deepEqual(execute(strictOutput), execute(strictSource));
+assert.deepEqual(execute(strictOutputNoAssume), execute(strictSource));
+const strictCount = (strictOutput.match(/(["'])use strict\1/g) || []).length;
+const strictCountNoAssume = (strictOutputNoAssume.match(/(["'])use strict\1/g) || []).length;
+assert.equal(strictCount, 1,
+  'expected --assume-strict to keep exactly one use strict directive in output');
+assert.ok(strictCountNoAssume > 1,
+  'expected output without --assume-strict to keep multiple use strict directives');
+const strictAst = parse(strictOutput, { sourceType: 'script' });
+assert.equal(strictAst.program.directives[0]?.value?.value, 'use strict',
+  'expected remaining use strict directive to be at top level');
+assert.equal(strictReport.strictNormalization.enabled, true);
+assert.equal(strictReport.strictNormalization.inserted, 1);
+assert.ok(strictReport.strictNormalization.removed >= 2,
+  'expected assume-strict pass to remove nested strict directives');
+assert.equal(strictReportNoAssume.strictNormalization.enabled, false);
+
 const concatSource = `
 (function(){
   const variable = 41;

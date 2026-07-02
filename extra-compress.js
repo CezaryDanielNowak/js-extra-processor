@@ -35,6 +35,7 @@ Options:
   --max-aliases <n>       Maximum aliases per top-level function scope (default: 80)
   --array-min-items <n>   Minimum strings in an array before trying join/split (default: 6)
   --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
+  --assume-strict         Assume strict mode is safe and collapse repeated "use strict" directives
   --no-string-arrays      Disable string-array compaction
   --no-alias-globals      Do not alias safe built-ins such as Object or Array
   --no-alias-undefined    Do not alias undefined and void 0 values
@@ -59,6 +60,7 @@ function parseArgs(argv) {
     maxAliases: 80,
     arrayMinItems: 6,
     arrayMinSaving: 2,
+    assumeStrict: false,
     stringArrays: true,
     aliasGlobals: true,
     aliasUndefined: true,
@@ -76,7 +78,8 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--help') usage(0);
-    if (arg === '--no-string-arrays') opts.stringArrays = false;
+    if (arg === '--assume-strict') opts.assumeStrict = true;
+    else if (arg === '--no-string-arrays') opts.stringArrays = false;
     else if (arg === '--no-alias-globals') opts.aliasGlobals = false;
     else if (arg === '--no-alias-undefined') opts.aliasUndefined = false;
     else if (arg === '--no-alias-properties') opts.aliasProperties = false;
@@ -165,6 +168,44 @@ function byteStats(text) {
       params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 }
     }).length
   };
+}
+
+function createUseStrictDirective() {
+  return t.directive(t.directiveLiteral('use strict'));
+}
+
+function stripUseStrictFromDirectives(directives) {
+  let removed = 0;
+
+  for (let index = directives.length - 1; index >= 0; index -= 1) {
+    const directive = directives[index];
+    if (directive?.value?.value !== 'use strict') continue;
+    directives.splice(index, 1);
+    removed += 1;
+  }
+
+  return removed;
+}
+
+function normalizeStrictDirectives(ast, report) {
+  let removed = 0;
+
+  traverse(ast, {
+    Program(programPath) {
+      if (!programPath.node.directives) programPath.node.directives = [];
+      removed += stripUseStrictFromDirectives(programPath.node.directives);
+      programPath.node.directives.unshift(createUseStrictDirective());
+    },
+
+    Function(functionPath) {
+      if (!t.isBlockStatement(functionPath.node.body)) return;
+      if (!functionPath.node.body.directives) functionPath.node.body.directives = [];
+      removed += stripUseStrictFromDirectives(functionPath.node.body.directives);
+    }
+  });
+
+  report.strictNormalization.removed = removed;
+  report.strictNormalization.inserted = 1;
 }
 
 function isDirectiveString(pathRef) {
@@ -338,19 +379,19 @@ function optimizeStringConcats(ast, report, minSaving = 1) {
           return;
         }
 
-        const terms = flattenPlusChain(binaryPath.node);
-  if (terms.length <= 2) return;
+          const terms = flattenPlusChain(binaryPath.node);
+          if (terms.length <= 2) return;
 
         const replacement = buildTemplateLiteralFromConcat(terms);
         if (!replacement) return;
         if (replacement.expressions.length <= 1) return;
 
-  const beforeCode = minifiedNode(binaryPath.node);
-  const afterCode = minifiedNode(replacement);
-  if (countBackslashes(afterCode) > countBackslashes(beforeCode)) return;
+          const beforeCode = minifiedNode(binaryPath.node);
+          const afterCode = minifiedNode(replacement);
+          if (countBackslashes(afterCode) > countBackslashes(beforeCode)) return;
 
-  const before = codeByteLength(beforeCode);
-  const after = codeByteLength(afterCode);
+          const before = codeByteLength(beforeCode);
+          const after = codeByteLength(afterCode);
         const saving = before - after;
         if (saving < minSaving) return;
         const location = binaryPath.node.loc?.start || null;
@@ -812,9 +853,15 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
     after: null,
     savings: null,
     arrayCompaction: null,
-    concatCompaction: null
+    concatCompaction: null,
+    strictNormalization: {
+      enabled: runOpts.assumeStrict,
+      removed: 0,
+      inserted: 0
+    }
   };
 
+  if (runOpts.assumeStrict) normalizeStrictDirectives(ast, report);
   compactStringArrays(ast, runOpts, report);
   if (stringConcatsEnabled) optimizeStringConcats(ast, report, stringConcatMinSaving);
   const scopeMap = collectCandidates(ast, runOpts);
@@ -910,7 +957,11 @@ async function main() {
   const concatLine = report.concatCompaction.attempted && !report.concatCompaction.selected
     ? `String concatenations rewritten: 0 (skipped: no net compressed gain)`
     : `String concatenations rewritten: ${report.stringConcats.length}`;
-  process.stdout.write([
+  const strictLine = report.strictNormalization.enabled
+    ? `Strict directives normalized: removed ${report.strictNormalization.removed}, inserted ${report.strictNormalization.inserted}`
+    : null;
+
+  const outputLines = [
     `Wrote ${opts.outputFile}`,
     arrayLine,
     concatLine,
@@ -919,6 +970,11 @@ async function main() {
     `Gzip:   ${beforeStats.gzip} -> ${afterStats.gzip}  saved ${report.savings.gzip} (${percent(report.savings.gzip, beforeStats.gzip)})`,
     `Brotli: ${beforeStats.brotli} -> ${afterStats.brotli}  saved ${report.savings.brotli} (${percent(report.savings.brotli, beforeStats.brotli)})`,
     ''
+  ];
+  if (strictLine) outputLines.splice(3, 0, strictLine);
+
+  process.stdout.write([
+    ...outputLines
   ].join('\n'));
 }
 

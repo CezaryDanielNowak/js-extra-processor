@@ -65,6 +65,8 @@ The compressor currently knows three useful tricks:
 
 It can also alias repeated `undefined` and `void 0` values by default; disable with `--no-alias-undefined`.
 
+If your bundle is already strict-safe, `--assume-strict` can collapse repeated `"use strict"` directives into a single top-level directive.
+
 It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
 
 ## Tiny example, big ambitions
