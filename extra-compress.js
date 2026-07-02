@@ -37,6 +37,7 @@ Options:
   --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
   --no-string-arrays      Disable string-array compaction
   --no-alias-globals      Do not alias safe built-ins such as Object or Array
+  --no-alias-undefined    Do not alias undefined and void 0 values
   --no-alias-properties   Do not alias property/method names
   --no-alias-strings      Do not alias repeated string literals
   --no-terser-print       Use Babel's compact printer instead of Terser for final printing
@@ -60,6 +61,7 @@ function parseArgs(argv) {
     arrayMinSaving: 2,
     stringArrays: true,
     aliasGlobals: true,
+    aliasUndefined: true,
     aliasProperties: true,
     aliasStrings: true,
     terserPrint: true,
@@ -76,6 +78,7 @@ function parseArgs(argv) {
     if (arg === '--help') usage(0);
     if (arg === '--no-string-arrays') opts.stringArrays = false;
     else if (arg === '--no-alias-globals') opts.aliasGlobals = false;
+    else if (arg === '--no-alias-undefined') opts.aliasUndefined = false;
     else if (arg === '--no-alias-properties') opts.aliasProperties = false;
     else if (arg === '--no-alias-strings') opts.aliasStrings = false;
     else if (arg === '--no-terser-print') opts.terserPrint = false;
@@ -436,19 +439,48 @@ function collectCandidates(ast, opts) {
     },
 
     ReferencedIdentifier(identifierPath) {
-      if (!opts.aliasGlobals) return;
       const name = identifierPath.node.name;
-      if (!SAFE_GLOBALS.has(name)) return;
       if (identifierPath.scope.getBinding(name)) return;
 
       const rootPath = getOutermostFunction(identifierPath);
       if (!rootPath || !isInRootBody(identifierPath, rootPath)) return;
 
       const record = getScopeRecord(scopeMap, rootPath);
+
+      if (opts.aliasUndefined && name === 'undefined') {
+        addOccurrence(record, 'u:undefined', 'undefined', 'undefined', {
+          kind: 'undefinedValue',
+          path: identifierPath,
+          oldCost: name.length,
+          overhead: 0
+        });
+        return;
+      }
+
+      if (!opts.aliasGlobals) return;
+      if (!SAFE_GLOBALS.has(name)) return;
+
       addOccurrence(record, `g:${name}`, 'global', name, {
         kind: 'global',
         path: identifierPath,
         oldCost: name.length,
+        overhead: 0
+      });
+    },
+
+    UnaryExpression(unaryPath) {
+      if (!opts.aliasUndefined) return;
+      if (unaryPath.node.operator !== 'void') return;
+      if (!t.isNumericLiteral(unaryPath.node.argument, { value: 0 })) return;
+
+      const rootPath = getOutermostFunction(unaryPath);
+      if (!rootPath || !isInRootBody(unaryPath, rootPath)) return;
+
+      const record = getScopeRecord(scopeMap, rootPath);
+      addOccurrence(record, 'u:undefined', 'undefined', 'undefined', {
+        kind: 'undefinedValue',
+        path: unaryPath,
+        oldCost: codeByteLength(minifiedNode(unaryPath.node)),
         overhead: 0
       });
     }
@@ -561,9 +593,9 @@ function* identifierNames() {
 }
 
 function candidateInitLength(candidate) {
-  return candidate.initKind === 'string'
-    ? stringLiteralLength(candidate.value)
-    : candidate.value.length;
+  if (candidate.initKind === 'string') return stringLiteralLength(candidate.value);
+  if (candidate.initKind === 'undefined') return codeByteLength(minifiedNode(t.unaryExpression('void', t.numericLiteral(0), true)));
+  return candidate.value.length;
 }
 
 function grossSaving(candidate, aliasLength) {
@@ -593,7 +625,10 @@ function chooseAliases(record, opts) {
 
   let candidates = [...record.candidates.values()]
     .filter((candidate) => candidate.occurrences.length >= opts.minOccurrences)
-    .filter((candidate) => candidate.initKind !== 'global' || !record.forbiddenGlobalWrites.has(candidate.value));
+    .filter((candidate) => {
+      if (candidate.initKind !== 'global' && candidate.initKind !== 'undefined') return true;
+      return !record.forbiddenGlobalWrites.has(candidate.value);
+    });
 
   // First rank by likely value, so a repeated long token is not excluded merely
   // because a short token occurs more often.
@@ -662,9 +697,10 @@ function applyAliases(scopeMap, opts, report) {
     const declarators = [];
     for (const candidate of selected) {
       const aliasId = t.identifier(candidate.alias);
-      const init = candidate.initKind === 'string'
-        ? t.stringLiteral(candidate.value)
-        : t.identifier(candidate.value);
+      let init;
+      if (candidate.initKind === 'string') init = t.stringLiteral(candidate.value);
+      else if (candidate.initKind === 'undefined') init = t.unaryExpression('void', t.numericLiteral(0), true);
+      else init = t.identifier(candidate.value);
       declarators.push(t.variableDeclarator(t.cloneNode(aliasId), init));
 
       let applied = 0;
@@ -693,6 +729,7 @@ function applyOccurrence(occurrence, alias) {
   switch (occurrence.kind) {
     case 'string':
     case 'global':
+    case 'undefinedValue':
       occurrence.path.replaceWith(id);
       break;
     case 'member':

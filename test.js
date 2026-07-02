@@ -80,6 +80,65 @@ assert.equal(report.concatCompaction.selected, false,
   'concat compaction should not be selected when no candidates exist');
 assert.ok(Buffer.byteLength(output) < Buffer.byteLength(source));
 
+const undefinedSource = `
+(function(){
+  const a = undefined;
+  const b = void 0;
+  const c = undefined;
+  const d = void 0;
+  const e = undefined;
+  globalThis.__optimizerResult = {
+    values: [a, b, c, d, e],
+    checks: [a === b, c === d, typeof e]
+  };
+})();
+`;
+const undefinedInputFile = path.join(tempDir, 'undefined-input.js');
+const undefinedOutputFile = path.join(tempDir, 'undefined-output.js');
+const undefinedReportFile = path.join(tempDir, 'undefined-report.json');
+const undefinedOutputNoAliasFile = path.join(tempDir, 'undefined-output-no-alias.js');
+const undefinedReportNoAliasFile = path.join(tempDir, 'undefined-report-no-alias.json');
+
+fs.writeFileSync(undefinedInputFile, undefinedSource);
+execFileSync(process.execPath, [
+  cliPath,
+  undefinedInputFile,
+  undefinedOutputFile,
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--min-occurrences', '2',
+  '--min-saving', '0',
+  '--report', undefinedReportFile
+], { stdio: 'inherit' });
+
+execFileSync(process.execPath, [
+  cliPath,
+  undefinedInputFile,
+  undefinedOutputNoAliasFile,
+  '--no-string-arrays',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--min-occurrences', '2',
+  '--min-saving', '0',
+  '--report', undefinedReportNoAliasFile
+], { stdio: 'inherit' });
+
+const undefinedOutput = fs.readFileSync(undefinedOutputFile, 'utf8');
+const undefinedOutputNoAlias = fs.readFileSync(undefinedOutputNoAliasFile, 'utf8');
+const undefinedReport = JSON.parse(fs.readFileSync(undefinedReportFile, 'utf8'));
+const undefinedReportNoAlias = JSON.parse(fs.readFileSync(undefinedReportNoAliasFile, 'utf8'));
+
+assert.deepEqual(execute(undefinedOutput), execute(undefinedSource));
+assert.deepEqual(execute(undefinedOutputNoAlias), execute(undefinedSource));
+assert.ok(undefinedReport.aliases.some((entry) => entry.type === 'undefined'),
+  'expected undefined/void 0 alias candidate to be selected');
+assert.ok(!undefinedReportNoAlias.aliases.some((entry) => entry.type === 'undefined'),
+  'expected --no-alias-undefined to disable undefined/void 0 aliasing');
+
 const concatSource = `
 (function(){
   const variable = 41;

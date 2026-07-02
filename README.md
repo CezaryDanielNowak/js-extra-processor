@@ -29,21 +29,21 @@ Updated after benchmark runs.
 
 | max-aliases | Raw saving | Gzip saving | Brotli saving |
 | --- | --- | --- | --- |
-| 80  | 160 921 bytes / 8.650% | 6 285 bytes / 1.236% | 2 454 bytes / 0.619% |
-| 120 | 178 083 bytes / 9.572% | 6 916 bytes / 1.360% | 2 318 bytes / 0.585% |
-| 160 | 191 610 bytes / 10.299% | 7 347 bytes / 1.445% | 2 392 bytes / 0.603% |
-| 200 | 202 951 bytes / 10.909% | 7 808 bytes / 1.535% | 2 459 bytes / 0.620% |
-| 240 | 212 369 bytes / 11.415% | 8 253 bytes / 1.623% | 2 465 bytes / 0.622% |
+| 80  | 167 910 bytes / 9.025% | 6 645 bytes / 1.307% | 2 460 bytes / 0.621% |
+| 120 | 185 270 bytes / 9.958% | 7 155 bytes / 1.407% | 2 665 bytes / 0.672% |
+| 160 | 198 846 bytes / 10.688% | 7 665 bytes / 1.507% | 2 816 bytes / 0.710% |
+| 200 | 210 210 bytes / 11.299% | 8 178 bytes / 1.608% | 2 623 bytes / 0.662% |
+| 240 | 219 710 bytes / 11.810% | 8 589 bytes / 1.689% | 2 450 bytes / 0.618% |
 
 ### With `--no-string-arrays`
 
 | max-aliases | Raw saving | Gzip saving | Brotli saving |
 | --- | --- | --- | --- |
-| 80  | 159 589 bytes / 8.578% | 6 693 bytes / 1.316% | 2 393 bytes / 0.604% |
-| 120 | 176 989 bytes / 9.513% | 7 461 bytes / 1.467% | 2 562 bytes / 0.646% |
-| 160 | 190 640 bytes / 10.247% | 7 620 bytes / 1.498% | 2 439 bytes / 0.615% |
-| 200 | 202 052 bytes / 10.861% | 8 174 bytes / 1.607% | 2 575 bytes / 0.650% |
-| 240 | 211 624 bytes / 11.375% | 8 500 bytes / 1.671% | 2 343 bytes / 0.591% |
+| 80  | 166 576 bytes / 8.954% | 7 023 bytes / 1.381% | 2 668 bytes / 0.673% |
+| 120 | 184 127 bytes / 9.897% | 7 829 bytes / 1.540% | 2 888 bytes / 0.729% |
+| 160 | 197 870 bytes / 10.636% | 8 000 bytes / 1.573% | 2 660 bytes / 0.671% |
+| 200 | 209 361 bytes / 11.253% | 8 443 bytes / 1.660% | 2 849 bytes / 0.719% |
+| 240 | 218 938 bytes / 11.768% | 8 918 bytes / 1.754% | 2 953 bytes / 0.745% |
 
 ## Quick start
 
@@ -62,6 +62,8 @@ The compressor currently knows three useful tricks:
 1. **Aliases repeated strings, property names, and safe global objects**
 2. **Compacts large arrays of strings using a joined string and `.split()`**
 3. **Rewrites some string concatenations into template literals when that is shorter, then keeps the rewrite only when compressed output stays favorable**
+
+It can also alias repeated `undefined` and `void 0` values by default; disable with `--no-alias-undefined`.
 
 It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
 
