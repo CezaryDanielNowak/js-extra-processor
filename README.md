@@ -34,6 +34,11 @@ node extra-compress.js input.js output.js \
 
 The CLI prints raw, gzip, and Brotli sizes. Raw output can shrink while gzip/Brotli gets slightly larger because those formats already deduplicate repeated text. Always compare the metric that matters for deployment.
 
+By default, string-array compaction is conservative:
+
+- Arrays shorter than 6 items are never rewritten.
+- The compressor compares final output with and without array compaction and keeps the smaller bundle.
+
 ## Safety boundaries
 
 - Parsing and rewriting are AST-based; comments and license comments beginning with `/*!` are preserved.
