@@ -25,7 +25,7 @@ Example input file: 1 860 426 bytes
 Measured on `widget-v1-en-before.js` with current code.
 Updated after benchmark runs.
 
-All values in these tables are measured with default options (object-array unpacking disabled unless `--object-unpacking` is explicitly passed).
+All values in these tables are measured with default options (instanceof helper disabled, object-array unpacking disabled unless explicitly enabled).
 
 ### With string-array compaction
 
@@ -59,14 +59,15 @@ That is the usual setup: **UglifyJS first, extra compressor second**.
 
 ## What it actually does
 
-The compressor currently applies six optimization points:
+The compressor currently applies seven optimization points:
 
 1. **Alias repeated strings, property names, and safe global objects**
 2. **Compact large string arrays using a joined string and `.split()`**
 3. **Rewrite selected string concatenations into template literals (guarded by compressed-size checks)**
 4. **Rewrite repeated-key object arrays to an unpacking helper call (opt-in via `--object-unpacking`)**
-5. **Alias repeated `undefined` and `void 0` values (disable with `--no-alias-undefined`)**
-6. **Collapse repeated `"use strict"` directives into one top-level directive (opt-in via `--assume-strict`)**
+5. **Rewrite `x instanceof X` to a short helper call (opt-in via `--instanceof-helper`)**
+6. **Alias repeated `undefined` and `void 0` values (disable with `--no-alias-undefined`)**
+7. **Collapse repeated `"use strict"` directives into one top-level directive (opt-in via `--assume-strict`)**
 
 It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
 
@@ -171,7 +172,28 @@ The helper name is generated dynamically with collision checks and kept as short
 
 Note: for my bundles, RAW saving was significant but Brotli result could be significantly worse, so keep this mode opt-in.
 
-### 5. Alias repeated `undefined` and `void 0` values
+### 5. Rewrite `x instanceof X` to a helper call
+
+This optimization is disabled by default; enable it with `--instanceof-helper`.
+
+Before:
+
+```js
+const a = value instanceof TypeA;
+const b = value2 instanceof TypeB;
+```
+
+After:
+
+```js
+const $ = (v, C) => v instanceof C;
+const a = $(value, TypeA);
+const b = $(value2, TypeB);
+```
+
+The helper name is generated dynamically, kept short, and collision-safe inside each function scope.
+
+### 6. Alias repeated `undefined` and `void 0` values
 
 Before:
 
@@ -193,7 +215,7 @@ const d = a;
 
 This optimization is enabled by default; disable it with `--no-alias-undefined`.
 
-### 6. Collapse repeated `"use strict"` directives (opt-in)
+### 7. Collapse repeated `"use strict"` directives (opt-in)
 
 Before:
 

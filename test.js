@@ -72,6 +72,10 @@ function execute(code) {
   return JSON.parse(JSON.stringify(sandbox.__optimizerResult));
 }
 
+function escapeForRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 assert.deepEqual(execute(output), execute(source));
 assert.ok(report.stringArrays.length >= 1, 'expected at least one compacted string array');
 assert.ok(report.aliases.some((entry) => entry.value === 'default'));
@@ -140,6 +144,115 @@ assert.ok(undefinedReport.aliases.some((entry) => entry.type === 'undefined'),
   'expected undefined/void 0 alias candidate to be selected');
 assert.ok(!undefinedReportNoAlias.aliases.some((entry) => entry.type === 'undefined'),
   'expected --no-alias-undefined to disable undefined/void 0 aliasing');
+
+const instanceofSource = `
+(function(){
+  function Parent() {}
+  class Child extends Parent {}
+  class Other {}
+  const values = [new Child(), new Child(), new Other()];
+  const checks = [
+    values[0] instanceof Parent,
+    values[1] instanceof Child,
+    values[2] instanceof Parent,
+    values[2] instanceof Other
+  ];
+  globalThis.__optimizerResult = { checks };
+})();
+`;
+const instanceofInputFile = path.join(tempDir, 'instanceof-input.js');
+const instanceofOutputFile = path.join(tempDir, 'instanceof-output.js');
+const instanceofReportFile = path.join(tempDir, 'instanceof-report.json');
+const instanceofOutputDisabledFile = path.join(tempDir, 'instanceof-output-disabled.js');
+const instanceofReportDisabledFile = path.join(tempDir, 'instanceof-report-disabled.json');
+
+fs.writeFileSync(instanceofInputFile, instanceofSource);
+execFileSync(process.execPath, [
+  cliPath,
+  instanceofInputFile,
+  instanceofOutputFile,
+  '--instanceof-helper',
+  '--no-string-arrays',
+  '--no-object-unpacking',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--report', instanceofReportFile
+], { stdio: 'inherit' });
+
+execFileSync(process.execPath, [
+  cliPath,
+  instanceofInputFile,
+  instanceofOutputDisabledFile,
+  '--no-string-arrays',
+  '--no-object-unpacking',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--report', instanceofReportDisabledFile
+], { stdio: 'inherit' });
+
+const instanceofOutput = fs.readFileSync(instanceofOutputFile, 'utf8');
+const instanceofReport = JSON.parse(fs.readFileSync(instanceofReportFile, 'utf8'));
+const instanceofOutputDisabled = fs.readFileSync(instanceofOutputDisabledFile, 'utf8');
+const instanceofReportDisabled = JSON.parse(fs.readFileSync(instanceofReportDisabledFile, 'utf8'));
+
+assert.deepEqual(execute(instanceofOutput), execute(instanceofSource));
+assert.deepEqual(execute(instanceofOutputDisabled), execute(instanceofSource));
+assert.equal(instanceofReport.options.instanceofHelper, true,
+  'expected --instanceof-helper to enable instanceof helper rewrites');
+assert.equal(instanceofReportDisabled.options.instanceofHelper, false,
+  'expected instanceof helper rewrites to be disabled by default');
+
+assert.equal(instanceofReport.instanceofSummary.candidates, 4,
+  'expected all instanceof expressions to be detected for helper rewrite');
+assert.equal(instanceofReport.instanceofSummary.rewritten, 4,
+  'expected all instanceof expressions to be rewritten to helper calls');
+assert.equal(instanceofReport.instanceofSummary.helpersInserted, 1,
+  'expected one helper declaration per top-level function scope');
+
+const instanceofHelperName = instanceofReport.instanceofHelpers[0]?.helper;
+assert.ok(typeof instanceofHelperName === 'string' && instanceofHelperName.length > 0,
+  'expected report to include a collision-safe helper name for instanceof rewrites');
+assert.match(instanceofOutput,
+  new RegExp(`const\\s+${escapeForRegExp(instanceofHelperName)}=\\(v,C\\)=>v\\s+instanceof\\s+C;`),
+  'expected helper declaration to match (v, C) => v instanceof C form');
+
+const instanceofAst = parse(instanceofOutput, { sourceType: 'script' });
+let helperCallCount = 0;
+let instanceofOperatorCount = 0;
+traverse(instanceofAst, {
+  CallExpression(callPath) {
+    if (t.isIdentifier(callPath.node.callee, { name: instanceofHelperName })) helperCallCount += 1;
+  },
+  BinaryExpression(binaryPath) {
+    if (binaryPath.node.operator === 'instanceof') instanceofOperatorCount += 1;
+  }
+});
+assert.equal(helperCallCount, 4,
+  'expected each instanceof expression to become a helper call');
+assert.equal(instanceofOperatorCount, 1,
+  'expected only helper body to retain instanceof operator');
+
+assert.equal(instanceofReportDisabled.instanceofSummary.rewritten, 0,
+  'expected default-disabled mode to skip helper rewrites');
+assert.equal(instanceofReportDisabled.instanceofSummary.helpersInserted, 0,
+  'expected default-disabled mode to avoid helper declaration insertion');
+assert.ok(!new RegExp(`const\\s+${escapeForRegExp(instanceofHelperName)}=\\(v,C\\)=>v\\s+instanceof\\s+C;`)
+  .test(instanceofOutputDisabled),
+  'expected disabled mode to keep original instanceof expressions without helper declaration');
+
+const instanceofDisabledAst = parse(instanceofOutputDisabled, { sourceType: 'script' });
+let disabledInstanceofOperatorCount = 0;
+traverse(instanceofDisabledAst, {
+  BinaryExpression(binaryPath) {
+    if (binaryPath.node.operator === 'instanceof') disabledInstanceofOperatorCount += 1;
+  }
+});
+assert.equal(disabledInstanceofOperatorCount, 4,
+  'expected disabled mode to preserve original instanceof operators');
 
 const strictSource = `
 (function(){

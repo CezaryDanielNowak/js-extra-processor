@@ -35,6 +35,8 @@ Options:
   --max-aliases <n>       Maximum aliases per top-level function scope (default: 160)
   --array-min-items <n>   Minimum strings in an array before trying join/split (default: 6)
   --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
+  --instanceof-helper     Enable instanceof helper rewrite (default: off)
+  --no-instanceof-helper  Disable instanceof helper rewrite
   --object-unpacking      Enable object-array unpacking helper transform (default: off)
   --no-object-unpacking   Disable object-array unpacking helper transform
   --assume-strict         Assume strict mode is safe and collapse repeated "use strict" directives
@@ -62,6 +64,7 @@ function parseArgs(argv) {
     maxAliases: 160,
     arrayMinItems: 6,
     arrayMinSaving: 2,
+    instanceofHelper: false,
     objectUnpacking: false,
     assumeStrict: false,
     stringArrays: true,
@@ -82,6 +85,8 @@ function parseArgs(argv) {
     }
     if (arg === '--help') usage(0);
     if (arg === '--assume-strict') opts.assumeStrict = true;
+    else if (arg === '--instanceof-helper') opts.instanceofHelper = true;
+    else if (arg === '--no-instanceof-helper') opts.instanceofHelper = false;
     else if (arg === '--object-unpacking') opts.objectUnpacking = true;
     else if (arg === '--no-object-unpacking') opts.objectUnpacking = false;
     else if (arg === '--no-string-arrays') opts.stringArrays = false;
@@ -431,6 +436,84 @@ function optimizeStringConcats(ast, report, minSaving = 1) {
       }
     }
   });
+}
+
+function allocateInstanceofHelperName(rootPath) {
+  const usedNames = collectUsedNames(rootPath);
+  for (const candidate of identifierNames()) {
+    if (!usedNames.has(candidate) && t.isValidIdentifier(candidate, true)) return candidate;
+  }
+
+  throw new Error('Could not allocate instanceof helper name');
+}
+
+function createInstanceofHelperDeclaration(helperName) {
+  return t.variableDeclaration('const', [
+    t.variableDeclarator(
+      t.identifier(helperName),
+      t.arrowFunctionExpression(
+        [t.identifier('v'), t.identifier('C')],
+        t.binaryExpression('instanceof', t.identifier('v'), t.identifier('C'))
+      )
+    )
+  ]);
+}
+
+function optimizeInstanceofHelpers(ast, report) {
+  const records = new Map();
+  let candidateCount = 0;
+
+  traverse(ast, {
+    BinaryExpression(binaryPath) {
+      if (binaryPath.node.operator !== 'instanceof') return;
+
+      const rootPath = getOutermostFunction(binaryPath);
+      if (!rootPath || !isInRootBody(binaryPath, rootPath)) return;
+
+      let record = records.get(rootPath.node);
+      if (!record) {
+        record = { rootPath, instances: [] };
+        records.set(rootPath.node, record);
+      }
+
+      candidateCount += 1;
+      record.instances.push({
+        path: binaryPath,
+        left: t.cloneNode(binaryPath.node.left, true),
+        right: t.cloneNode(binaryPath.node.right, true),
+        location: binaryPath.node.loc?.start || null
+      });
+    }
+  });
+
+  report.instanceofSummary.candidates = candidateCount;
+
+  for (const record of records.values()) {
+    const rewrites = record.instances.filter((instance) => instance.path && !instance.path.removed);
+    if (!rewrites.length) continue;
+
+    const helperName = allocateInstanceofHelperName(record.rootPath);
+    insertDeclaration(record.rootPath, createInstanceofHelperDeclaration(helperName));
+    report.instanceofSummary.helpersInserted += 1;
+    report.instanceofHelpers.push({
+      helper: helperName,
+      scopeStart: record.rootPath.node.loc?.start || null
+    });
+
+    for (const instance of rewrites) {
+      instance.path.replaceWith(
+        t.callExpression(t.identifier(helperName), [
+          t.cloneNode(instance.left, true),
+          t.cloneNode(instance.right, true)
+        ])
+      );
+      report.instanceofSummary.rewritten += 1;
+      report.instanceofRewrites.push({
+        helper: helperName,
+        location: instance.location
+      });
+    }
+  }
 }
 
 function analyzeObjectArrayUnpackCandidate(arrayNode) {
@@ -1079,6 +1162,8 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
     options: { ...runOpts, positional: undefined, inputFile: undefined, outputFile: undefined },
     stringArrays: [],
     stringConcats: [],
+    instanceofHelpers: [],
+    instanceofRewrites: [],
     objectUnpacks: [],
     aliases: [],
     before: beforeStats,
@@ -1086,6 +1171,11 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
     savings: null,
     arrayCompaction: null,
     concatCompaction: null,
+    instanceofSummary: {
+      candidates: 0,
+      rewritten: 0,
+      helpersInserted: 0
+    },
     objectUnpackSummary: {
       candidates: 0,
       rewritten: 0,
@@ -1106,6 +1196,7 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
   if (runOpts.objectUnpacking) optimizeObjectArrayUnpacking(ast, report);
   const scopeMap = collectCandidates(ast, runOpts);
   applyAliases(scopeMap, runOpts, report);
+  if (runOpts.instanceofHelper) optimizeInstanceofHelpers(ast, report);
   const output = await printCode(ast, runOpts);
 
   // Final parser pass catches accidental invalid output before writing it.
@@ -1197,6 +1288,7 @@ async function main() {
   const concatLine = report.concatCompaction.attempted && !report.concatCompaction.selected
     ? `String concatenations rewritten: 0 (skipped: no net compressed gain)`
     : `String concatenations rewritten: ${report.stringConcats.length}`;
+  const instanceofLine = `Instanceof rewrites: ${report.instanceofSummary.rewritten}`;
   const unpackLine = `Object arrays unpacked: ${report.objectUnpackSummary.rewritten}`;
   const strictLine = report.strictNormalization.enabled
     ? `Strict directives normalized: removed ${report.strictNormalization.removed}, inserted ${report.strictNormalization.inserted}`
@@ -1206,6 +1298,7 @@ async function main() {
     `Wrote ${opts.outputFile}`,
     arrayLine,
     concatLine,
+    instanceofLine,
     unpackLine,
     `Aliases inserted: ${report.aliases.length}`,
     `Raw:    ${beforeStats.raw} -> ${afterStats.raw}  saved ${report.savings.raw} (${percent(report.savings.raw, beforeStats.raw)})`,
