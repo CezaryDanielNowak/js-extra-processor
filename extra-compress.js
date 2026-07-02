@@ -21,8 +21,7 @@ const SAFE_GLOBALS = new Set([
 ]);
 
 const DELIMITERS = [
-  '!', '|', '~', '^', '@', '#', '%', '&', '*', ';', ':', ',', '?', '/',
-  '\\', '+', '=', '-', '_', '.', '§', '¶', '¦', '¬', '·'
+  '!', '|', '~', '^', '@', '#', '%', '&', '*', ';', ':', ',', '?', '/', '+', '=', '-', '_', '.', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0'
 ];
 
 function usage(exitCode = 0) {
@@ -35,7 +34,7 @@ Options:
   --min-saving <n>        Minimum estimated raw-byte saving per alias (default: 2)
   --max-aliases <n>       Maximum aliases per top-level function scope (default: 80)
   --array-min-items <n>   Minimum strings in an array before trying join/split (default: 6)
-  --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 1)
+  --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
   --no-string-arrays      Disable string-array compaction
   --no-alias-globals      Do not alias safe built-ins such as Object or Array
   --no-alias-properties   Do not alias property/method names
@@ -58,7 +57,7 @@ function parseArgs(argv) {
     minSaving: 2,
     maxAliases: 80,
     arrayMinItems: 6,
-    arrayMinSaving: 1,
+    arrayMinSaving: 2,
     stringArrays: true,
     aliasGlobals: true,
     aliasProperties: true,
@@ -83,7 +82,7 @@ function parseArgs(argv) {
     else if (arg === '--min-occurrences') opts.minOccurrences = readInt(argv, ++i, arg, 2);
     else if (arg === '--min-saving') opts.minSaving = readInt(argv, ++i, arg, 0);
     else if (arg === '--max-aliases') opts.maxAliases = readInt(argv, ++i, arg, 0);
-    else if (arg === '--array-min-items') opts.arrayMinItems = readInt(argv, ++i, arg, 2);
+    else if (arg === '--array-min-items') opts.arrayMinItems = readInt(argv, ++i, arg, 6);
     else if (arg === '--array-min-saving') opts.arrayMinSaving = readInt(argv, ++i, arg, 0);
     else if (arg === '--report') opts.reportFile = argv[++i] || usage(1);
     else usage(1);
@@ -643,30 +642,34 @@ async function printCode(ast, opts) {
   return result.code;
 }
 
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const input = fs.readFileSync(opts.inputFile, 'utf8');
-  const beforeStats = byteStats(input);
+function isSmallerBundle(a, b) {
+  if (a.raw !== b.raw) return a.raw < b.raw;
+  if (a.gzip !== b.gzip) return a.gzip < b.gzip;
+  return a.brotli <= b.brotli;
+}
+
+async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled) {
+  const runOpts = { ...opts, stringArrays: stringArraysEnabled };
   const ast = parseCode(input, opts.inputFile);
   const report = {
     input: opts.inputFile,
     output: opts.outputFile,
-    options: { ...opts, positional: undefined, inputFile: undefined, outputFile: undefined },
+    options: { ...runOpts, positional: undefined, inputFile: undefined, outputFile: undefined },
     stringArrays: [],
     aliases: [],
     before: beforeStats,
     after: null,
-    savings: null
+    savings: null,
+    arrayCompaction: null
   };
 
-  compactStringArrays(ast, opts, report);
-  const scopeMap = collectCandidates(ast, opts);
-  applyAliases(scopeMap, opts, report);
-  const output = await printCode(ast, opts);
+  compactStringArrays(ast, runOpts, report);
+  const scopeMap = collectCandidates(ast, runOpts);
+  applyAliases(scopeMap, runOpts, report);
+  const output = await printCode(ast, runOpts);
 
   // Final parser pass catches accidental invalid output before writing it.
   parseCode(output, opts.outputFile);
-  fs.writeFileSync(opts.outputFile, output);
 
   const afterStats = byteStats(output);
   report.after = afterStats;
@@ -676,14 +679,57 @@ async function main() {
     brotli: beforeStats.brotli - afterStats.brotli
   };
 
+  return { output, report, afterStats };
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const input = fs.readFileSync(opts.inputFile, 'utf8');
+  const beforeStats = byteStats(input);
+  let chosen;
+
+  if (opts.stringArrays) {
+    const withArrays = await optimizeOnce(input, opts, beforeStats, true);
+    const withoutArrays = await optimizeOnce(input, opts, beforeStats, false);
+    const keepArrays = isSmallerBundle(withArrays.afterStats, withoutArrays.afterStats);
+
+    chosen = keepArrays ? withArrays : withoutArrays;
+    chosen.report.arrayCompaction = {
+      attempted: true,
+      selected: keepArrays,
+      candidateCount: withArrays.report.stringArrays.length,
+      rawDiffVsNoArrays: withoutArrays.afterStats.raw - withArrays.afterStats.raw,
+      gzipDiffVsNoArrays: withoutArrays.afterStats.gzip - withArrays.afterStats.gzip,
+      brotliDiffVsNoArrays: withoutArrays.afterStats.brotli - withArrays.afterStats.brotli
+    };
+  } else {
+    chosen = await optimizeOnce(input, opts, beforeStats, false);
+    chosen.report.arrayCompaction = {
+      attempted: false,
+      selected: false,
+      candidateCount: 0,
+      rawDiffVsNoArrays: 0,
+      gzipDiffVsNoArrays: 0,
+      brotliDiffVsNoArrays: 0
+    };
+  }
+
+  fs.writeFileSync(opts.outputFile, chosen.output);
+
+  const report = chosen.report;
+  const afterStats = report.after;
+
   if (opts.reportFile) {
     fs.writeFileSync(path.resolve(opts.reportFile), `${JSON.stringify(report, null, 2)}\n`);
   }
 
   const percent = (saved, original) => `${((saved / original) * 100).toFixed(3)}%`;
+  const arrayLine = report.arrayCompaction.attempted && !report.arrayCompaction.selected
+    ? `String arrays compacted: 0 (skipped: no net bundle gain)`
+    : `String arrays compacted: ${report.stringArrays.length}`;
   process.stdout.write([
     `Wrote ${opts.outputFile}`,
-    `String arrays compacted: ${report.stringArrays.length}`,
+    arrayLine,
     `Aliases inserted: ${report.aliases.length}`,
     `Raw:    ${beforeStats.raw} -> ${afterStats.raw}  saved ${report.savings.raw} (${percent(report.savings.raw, beforeStats.raw)})`,
     `Gzip:   ${beforeStats.gzip} -> ${afterStats.gzip}  saved ${report.savings.gzip} (${percent(report.savings.gzip, beforeStats.gzip)})`,
