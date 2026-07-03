@@ -76,6 +76,17 @@ function escapeForRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function findVariableInitType(ast, name) {
+  let initType = null;
+  traverse(ast, {
+    VariableDeclarator(declaratorPath) {
+      if (!t.isIdentifier(declaratorPath.node.id, { name })) return;
+      initType = declaratorPath.node.init ? declaratorPath.node.init.type : null;
+    }
+  });
+  return initType;
+}
+
 assert.deepEqual(execute(output), execute(source));
 assert.ok(report.stringArrays.length >= 1, 'expected at least one compacted string array');
 assert.ok(report.aliases.some((entry) => entry.value === 'default'));
@@ -144,6 +155,26 @@ assert.ok(undefinedReport.aliases.some((entry) => entry.type === 'undefined'),
   'expected undefined/void 0 alias candidate to be selected');
 assert.ok(!undefinedReportNoAlias.aliases.some((entry) => entry.type === 'undefined'),
   'expected --no-alias-undefined to disable undefined/void 0 aliasing');
+
+const undefinedAliasNames = undefinedReport.aliases
+  .filter((entry) => entry.type === 'undefined')
+  .map((entry) => entry.alias);
+const undefinedAst = parse(undefinedOutput, { sourceType: 'script' });
+let undefinedAliasWithVoidInit = false;
+traverse(undefinedAst, {
+  VariableDeclaration(declarationPath) {
+    if (declarationPath.node.kind !== 'const') return;
+    for (const declarator of declarationPath.node.declarations) {
+      if (!t.isIdentifier(declarator.id)) continue;
+      if (!undefinedAliasNames.includes(declarator.id.name)) continue;
+      if (!t.isUnaryExpression(declarator.init, { operator: 'void' })) continue;
+      if (!t.isNumericLiteral(declarator.init.argument, { value: 0 })) continue;
+      undefinedAliasWithVoidInit = true;
+    }
+  }
+});
+assert.ok(undefinedAliasWithVoidInit,
+  'expected undefined alias declarations to keep explicit = void 0 initializer');
 
 const instanceofSource = `
 (function(){
@@ -253,6 +284,94 @@ traverse(instanceofDisabledAst, {
 });
 assert.equal(disabledInstanceofOperatorCount, 4,
   'expected disabled mode to preserve original instanceof operators');
+
+const arrowSource = `
+(function(){
+  const add = function(a, b) { return a + b; };
+  const square = function(value) { return value * value; };
+  const make = function(value) { this.value = value; };
+  const dynamic = function() { return this && this.kind; };
+  const plain = function(v) { return add(v, 1); };
+  globalThis.__optimizerResult = {
+    add: add(2, 3),
+    square: square(4),
+    constructed: new make(9).value,
+    dynamic: dynamic.call({ kind: 'ok' }),
+    plain: plain(6)
+  };
+})();
+`;
+const arrowInputFile = path.join(tempDir, 'arrow-input.js');
+const arrowOutputFile = path.join(tempDir, 'arrow-output.js');
+const arrowReportFile = path.join(tempDir, 'arrow-report.json');
+const arrowOutputDisabledFile = path.join(tempDir, 'arrow-output-disabled.js');
+const arrowReportDisabledFile = path.join(tempDir, 'arrow-report-disabled.json');
+
+fs.writeFileSync(arrowInputFile, arrowSource);
+execFileSync(process.execPath, [
+  cliPath,
+  arrowInputFile,
+  arrowOutputFile,
+  '--arrow-functions',
+  '--no-string-arrays',
+  '--no-instanceof-helper',
+  '--no-object-unpacking',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--min-occurrences', '99',
+  '--report', arrowReportFile
+], { stdio: 'inherit' });
+
+execFileSync(process.execPath, [
+  cliPath,
+  arrowInputFile,
+  arrowOutputDisabledFile,
+  '--no-string-arrays',
+  '--no-instanceof-helper',
+  '--no-object-unpacking',
+  '--no-alias-globals',
+  '--no-alias-properties',
+  '--no-alias-strings',
+  '--no-alias-undefined',
+  '--min-occurrences', '99',
+  '--report', arrowReportDisabledFile
+], { stdio: 'inherit' });
+
+const arrowOutput = fs.readFileSync(arrowOutputFile, 'utf8');
+const arrowOutputDisabled = fs.readFileSync(arrowOutputDisabledFile, 'utf8');
+const arrowReport = JSON.parse(fs.readFileSync(arrowReportFile, 'utf8'));
+const arrowReportDisabled = JSON.parse(fs.readFileSync(arrowReportDisabledFile, 'utf8'));
+
+assert.deepEqual(execute(arrowOutput), execute(arrowSource));
+assert.deepEqual(execute(arrowOutputDisabled), execute(arrowSource));
+assert.equal(arrowReport.options.arrowFunctions, true,
+  'expected --arrow-functions to enable arrow-function rewrites');
+assert.equal(arrowReportDisabled.options.arrowFunctions, false,
+  'expected arrow-function rewrites to be disabled by default');
+assert.ok(arrowReport.arrowSummary.candidates >= 3,
+  'expected multiple function expressions to be considered for arrow rewrite');
+assert.ok(arrowReport.arrowSummary.rewritten >= 3,
+  'expected arrow rewrite pass to convert call-only function-expression bindings');
+assert.equal(arrowReportDisabled.arrowSummary.rewritten, 0,
+  'expected disabled mode to skip arrow rewrites');
+
+const arrowAst = parse(arrowOutput, { sourceType: 'script' });
+const arrowDisabledAst = parse(arrowOutputDisabled, { sourceType: 'script' });
+
+assert.equal(findVariableInitType(arrowAst, 'add'), 'ArrowFunctionExpression',
+  'expected add() function expression to be rewritten to arrow form');
+assert.equal(findVariableInitType(arrowAst, 'square'), 'ArrowFunctionExpression',
+  'expected square() function expression to be rewritten to arrow form');
+assert.equal(findVariableInitType(arrowAst, 'plain'), 'ArrowFunctionExpression',
+  'expected plain() function expression to be rewritten to arrow form');
+assert.equal(findVariableInitType(arrowAst, 'make'), 'FunctionExpression',
+  'expected constructor-used function to remain a normal function expression');
+assert.equal(findVariableInitType(arrowAst, 'dynamic'), 'FunctionExpression',
+  'expected this-sensitive function to remain a normal function expression');
+assert.equal(findVariableInitType(arrowDisabledAst, 'add'), 'FunctionExpression',
+  'expected disabled mode output to preserve function expressions');
 
 const strictSource = `
 (function(){

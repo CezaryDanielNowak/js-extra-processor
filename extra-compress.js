@@ -35,6 +35,8 @@ Options:
   --max-aliases <n>       Maximum aliases per top-level function scope (default: 160)
   --array-min-items <n>   Minimum strings in an array before trying join/split (default: 6)
   --array-min-saving <n>  Minimum raw-byte saving for an array rewrite (default: 2)
+  --arrow-functions       Enable function-expression to arrow rewrites (default: off; makes final bundle larger; TODO: investigate)
+  --no-arrow-functions    Disable function-expression to arrow rewrites
   --instanceof-helper     Enable instanceof helper rewrite (default: off)
   --no-instanceof-helper  Disable instanceof helper rewrite
   --object-unpacking      Enable object-array unpacking helper transform (default: off)
@@ -64,6 +66,7 @@ function parseArgs(argv) {
     maxAliases: 160,
     arrayMinItems: 6,
     arrayMinSaving: 2,
+    arrowFunctions: false,
     instanceofHelper: false,
     objectUnpacking: false,
     assumeStrict: false,
@@ -85,6 +88,8 @@ function parseArgs(argv) {
     }
     if (arg === '--help') usage(0);
     if (arg === '--assume-strict') opts.assumeStrict = true;
+    else if (arg === '--arrow-functions') opts.arrowFunctions = true;
+    else if (arg === '--no-arrow-functions') opts.arrowFunctions = false;
     else if (arg === '--instanceof-helper') opts.instanceofHelper = true;
     else if (arg === '--no-instanceof-helper') opts.instanceofHelper = false;
     else if (arg === '--object-unpacking') opts.objectUnpacking = true;
@@ -436,6 +441,157 @@ function optimizeStringConcats(ast, report, minSaving = 1) {
       }
     }
   });
+}
+
+function hasDuplicateParamBindings(params) {
+  const names = new Set();
+
+  for (const param of params) {
+    const bindings = Object.keys(t.getBindingIdentifiers(param));
+    for (const bindingName of bindings) {
+      if (names.has(bindingName)) return true;
+      names.add(bindingName);
+    }
+  }
+
+  return false;
+}
+
+function hasArrowUnsafeSemantics(functionPath) {
+  let unsafe = false;
+
+  functionPath.traverse({
+    Function(innerPath) {
+      if (innerPath === functionPath) return;
+      if (!innerPath.isArrowFunctionExpression()) innerPath.skip();
+    },
+
+    ThisExpression(thisPath) {
+      unsafe = true;
+      thisPath.stop();
+    },
+
+    Super(superPath) {
+      unsafe = true;
+      superPath.stop();
+    },
+
+    MetaProperty(metaPath) {
+      if (!t.isIdentifier(metaPath.node.meta, { name: 'new' })) return;
+      if (!t.isIdentifier(metaPath.node.property, { name: 'target' })) return;
+      unsafe = true;
+      metaPath.stop();
+    },
+
+    Identifier(identifierPath) {
+      if (!identifierPath.isReferencedIdentifier({ name: 'arguments' })) return;
+      if (identifierPath.scope.hasBinding('arguments')) return;
+      unsafe = true;
+      identifierPath.stop();
+    },
+
+    CallExpression(callPath) {
+      const calleePath = callPath.get('callee');
+      if (!calleePath.isIdentifier({ name: 'eval' })) return;
+      if (callPath.scope.hasBinding('eval')) return;
+      unsafe = true;
+      callPath.stop();
+    }
+  });
+
+  return unsafe;
+}
+
+function canRewriteBoundFunctionExpression(functionPath) {
+  const declaratorPath = functionPath.parentPath;
+  if (!declaratorPath || !declaratorPath.isVariableDeclarator() || declaratorPath.node.init !== functionPath.node) {
+    return false;
+  }
+
+  const idPath = declaratorPath.get('id');
+  if (!idPath.isIdentifier()) return false;
+
+  const binding = functionPath.scope.getBinding(idPath.node.name);
+  if (!binding || !binding.constant) return false;
+
+  for (const referencePath of binding.referencePaths) {
+    const referenceParent = referencePath.parentPath;
+    if (referenceParent && referenceParent.isCallExpression() && referenceParent.node.callee === referencePath.node) {
+      continue;
+    }
+    if (referenceParent && typeof referenceParent.isOptionalCallExpression === 'function' &&
+        referenceParent.isOptionalCallExpression() &&
+        referenceParent.node.callee === referencePath.node) {
+      continue;
+    }
+    return false;
+  }
+
+  return true;
+}
+
+function canRewriteFunctionExpressionToArrow(functionPath) {
+  const node = functionPath.node;
+  if (!functionPath.isFunctionExpression()) return false;
+  if (node.id) return false;
+  if (node.generator) return false;
+  if (hasDuplicateParamBindings(node.params)) return false;
+  if (hasArrowUnsafeSemantics(functionPath)) return false;
+  return canRewriteBoundFunctionExpression(functionPath);
+}
+
+function buildArrowFunctionReplacement(functionNode) {
+  let body = t.cloneNode(functionNode.body, true);
+  if (t.isBlockStatement(functionNode.body) &&
+      (!functionNode.body.directives || functionNode.body.directives.length === 0) &&
+      functionNode.body.body.length === 1 &&
+      t.isReturnStatement(functionNode.body.body[0]) &&
+      functionNode.body.body[0].argument) {
+    body = t.cloneNode(functionNode.body.body[0].argument, true);
+  }
+
+  const arrow = t.arrowFunctionExpression(
+    functionNode.params.map((param) => t.cloneNode(param, true)),
+    body,
+    functionNode.async
+  );
+
+  if (functionNode.typeParameters) arrow.typeParameters = t.cloneNode(functionNode.typeParameters, true);
+  if (functionNode.returnType) arrow.returnType = t.cloneNode(functionNode.returnType, true);
+
+  return arrow;
+}
+
+function optimizeArrowFunctions(ast, report) {
+  let candidateCount = 0;
+
+  traverse(ast, {
+    FunctionExpression: {
+      exit(functionPath) {
+        if (!canRewriteFunctionExpressionToArrow(functionPath)) return;
+
+        candidateCount += 1;
+        const before = codeByteLength(minifiedNode(functionPath.node));
+        const replacement = buildArrowFunctionReplacement(functionPath.node);
+        const after = codeByteLength(minifiedNode(replacement));
+        const saving = before - after;
+        if (saving <= 0) return;
+
+        const location = functionPath.node.loc?.start || null;
+        functionPath.replaceWith(replacement);
+
+        report.arrowSummary.rewritten += 1;
+        report.arrowFunctions.push({
+          before,
+          after,
+          saving,
+          location
+        });
+      }
+    }
+  });
+
+  report.arrowSummary.candidates = candidateCount;
 }
 
 function allocateInstanceofHelperName(rootPath) {
@@ -953,6 +1109,10 @@ function candidateInitLength(candidate) {
   return candidate.value.length;
 }
 
+function candidateDeclarationEntryLength(candidate, aliasLength) {
+  return aliasLength + 1 + candidateInitLength(candidate) + 1;
+}
+
 function grossSaving(candidate, aliasLength) {
   return candidate.occurrences.reduce(
     (total, occurrence) => total + occurrence.oldCost - (aliasLength + occurrence.overhead),
@@ -990,7 +1150,7 @@ function chooseAliases(record, opts) {
   candidates.forEach((candidate) => {
     const assumedAliasLength = 2;
     candidate.roughSaving = grossSaving(candidate, assumedAliasLength) -
-      (assumedAliasLength + 1 + candidateInitLength(candidate) + 1);
+      candidateDeclarationEntryLength(candidate, assumedAliasLength);
   });
   candidates.sort((a, b) => b.roughSaving - a.roughSaving);
   candidates = candidates.slice(0, Math.max(opts.maxAliases * 3, opts.maxAliases));
@@ -1003,7 +1163,7 @@ function chooseAliases(record, opts) {
 
     candidates = candidates.filter((candidate) => {
       const gross = grossSaving(candidate, codeByteLength(candidate.alias));
-      const declarationEntry = codeByteLength(candidate.alias) + 1 + candidateInitLength(candidate) + 1;
+      const declarationEntry = candidateDeclarationEntryLength(candidate, codeByteLength(candidate.alias));
       candidate.estimatedSaving = gross - declarationEntry;
       return candidate.estimatedSaving >= opts.minSaving;
     });
@@ -1024,7 +1184,7 @@ function chooseAliases(record, opts) {
   candidates.forEach((candidate, index) => {
     candidate.alias = aliases[index];
     const gross = grossSaving(candidate, codeByteLength(candidate.alias));
-    const declarationEntry = codeByteLength(candidate.alias) + 1 + candidateInitLength(candidate) + 1;
+    const declarationEntry = candidateDeclarationEntryLength(candidate, codeByteLength(candidate.alias));
     candidate.estimatedSaving = gross - declarationEntry;
   });
 
@@ -1162,6 +1322,7 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
     options: { ...runOpts, positional: undefined, inputFile: undefined, outputFile: undefined },
     stringArrays: [],
     stringConcats: [],
+    arrowFunctions: [],
     instanceofHelpers: [],
     instanceofRewrites: [],
     objectUnpacks: [],
@@ -1171,6 +1332,10 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
     savings: null,
     arrayCompaction: null,
     concatCompaction: null,
+    arrowSummary: {
+      candidates: 0,
+      rewritten: 0
+    },
     instanceofSummary: {
       candidates: 0,
       rewritten: 0,
@@ -1197,6 +1362,7 @@ async function optimizeOnce(input, opts, beforeStats, stringArraysEnabled, strin
   const scopeMap = collectCandidates(ast, runOpts);
   applyAliases(scopeMap, runOpts, report);
   if (runOpts.instanceofHelper) optimizeInstanceofHelpers(ast, report);
+  if (runOpts.arrowFunctions) optimizeArrowFunctions(ast, report);
   const output = await printCode(ast, runOpts);
 
   // Final parser pass catches accidental invalid output before writing it.
@@ -1288,6 +1454,7 @@ async function main() {
   const concatLine = report.concatCompaction.attempted && !report.concatCompaction.selected
     ? `String concatenations rewritten: 0 (skipped: no net compressed gain)`
     : `String concatenations rewritten: ${report.stringConcats.length}`;
+  const arrowLine = `Arrow function rewrites: ${report.arrowSummary.rewritten}`;
   const instanceofLine = `Instanceof rewrites: ${report.instanceofSummary.rewritten}`;
   const unpackLine = `Object arrays unpacked: ${report.objectUnpackSummary.rewritten}`;
   const strictLine = report.strictNormalization.enabled
@@ -1298,6 +1465,7 @@ async function main() {
     `Wrote ${opts.outputFile}`,
     arrayLine,
     concatLine,
+    arrowLine,
     instanceofLine,
     unpackLine,
     `Aliases inserted: ${report.aliases.length}`,

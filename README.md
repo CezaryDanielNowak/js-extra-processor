@@ -51,11 +51,11 @@ All values in these tables are measured with default options (instanceof helper 
 
 | max-aliases | Raw saving | Gzip saving | Brotli saving |
 | --- | --- | --- | --- |
-| 80  | 183 275 bytes / 9.851% | 6 874 bytes / 1.352% | 2 529 bytes / 0.638% |
-| 120 | 200 655 bytes / 10.785% | 7 612 bytes / 1.497% | 2 538 bytes / 0.640% |
-| 160 | 214 330 bytes / 11.520% | 8 082 bytes / 1.589% | 2 728 bytes / 0.688% |
-| 200 | 225 747 bytes / 12.134% | 8 763 bytes / 1.723% | 2 797 bytes / 0.706% |
-| 240 | 235 274 bytes / 12.646% | 8 913 bytes / 1.753% | 2 643 bytes / 0.667% |
+| 80  | 177 380 bytes / 9.534% | 6 395 bytes / 1.258% | 2 133 bytes / 0.538% |
+| 120 | 194 738 bytes / 10.467% | 7 144 bytes / 1.405% | 2 313 bytes / 0.583% |
+| 160 | 208 436 bytes / 11.204% | 7 625 bytes / 1.499% | 2 412 bytes / 0.608% |
+| 200 | 219 853 bytes / 11.817% | 8 325 bytes / 1.637% | 2 284 bytes / 0.576% |
+| 240 | 229 343 bytes / 12.327% | 8 614 bytes / 1.694% | 2 323 bytes / 0.586% |
 
 Defaults are configured for brotli savings. All features enabled will make raw file smaller, but no gain for brotli. Results might be different for your file.
 
@@ -71,15 +71,16 @@ That is the usual setup: **UglifyJS first, extra compressor second**.
 
 ## What it actually does
 
-The compressor currently applies seven optimization points:
+The compressor currently applies eight optimization points:
 
 1. **Alias repeated strings, property names, and safe global objects**
 2. **Compact large string arrays using a joined string and `.split()`**
 3. **Rewrite selected string concatenations into template literals (guarded by compressed-size checks)**
-4. **Rewrite repeated-key object arrays to an unpacking helper call (opt-in via `--object-unpacking`)**
-5. **Rewrite `x instanceof X` to a short helper call (opt-in via `--instanceof-helper`)**
-6. **Alias repeated `undefined` and `void 0` values (disable with `--no-alias-undefined`)**
-7. **Collapse repeated `"use strict"` directives into one top-level directive (opt-in via `--assume-strict`)**
+4. **Rewrite eligible function expressions to arrow functions (opt-in via `--arrow-functions`)**
+5. **Rewrite repeated-key object arrays to an unpacking helper call (opt-in via `--object-unpacking`)**
+6. **Rewrite `x instanceof X` to a short helper call (opt-in via `--instanceof-helper`)**
+7. **Alias repeated `undefined` and `void 0` values (disable with `--no-alias-undefined`)**
+8. **Collapse repeated `"use strict"` directives into one top-level directive (opt-in via `--assume-strict`)**
 
 It evaluates estimated byte savings before applying aliases and validates that the generated output is still valid JavaScript before writing it.
 
@@ -153,7 +154,28 @@ const message2 = `User ${nextId} has ${count} items.`;
 
 This rewrite is guarded by compressed-size checks, so it is kept only when gzip/brotli results stay favorable.
 
-### 4. Rewrite repeated-key object arrays to an unpacking helper call (opt-in)
+### 4. Rewrite eligible function expressions to arrow functions
+
+This optimization is disabled by default; enable it with `--arrow-functions`.
+
+Before:
+
+```js
+const add = function(a, b) { return a + b; };
+const next = function(v) { return add(v, 1); };
+```
+
+After:
+
+```js
+const add = (a, b) => a + b;
+const next = v => add(v, 1);
+```
+
+This pass targets only anonymous, non-generator function expressions that are safe to convert and actually reduce bytes.
+Functions that depend on dynamic `this`, `arguments`, `super`, `new.target`, direct `eval`, or constructor-style usage are left unchanged.
+
+### 5. Rewrite repeated-key object arrays to an unpacking helper call (opt-in)
 
 Object-array unpacking is disabled by default. Enable it with `--object-unpacking`.
 
@@ -184,7 +206,7 @@ The helper name is generated dynamically with collision checks and kept as short
 
 Note: for my bundles, RAW saving was significant but Brotli result could be significantly worse, so keep this mode opt-in.
 
-### 5. Rewrite `x instanceof X` to a helper call
+### 6. Rewrite `x instanceof X` to a helper call
 
 This optimization is disabled by default; enable it with `--instanceof-helper`.
 
@@ -205,7 +227,7 @@ const b = $(value2, TypeB);
 
 The helper name is generated dynamically, kept short, and collision-safe inside each function scope.
 
-### 6. Alias repeated `undefined` and `void 0` values
+### 7. Alias repeated `undefined` and `void 0` values
 
 Before:
 
@@ -227,7 +249,7 @@ const d = a;
 
 This optimization is enabled by default; disable it with `--no-alias-undefined`.
 
-### 7. Collapse repeated `"use strict"` directives (opt-in)
+### 8. Collapse repeated `"use strict"` directives (opt-in)
 
 Before:
 
