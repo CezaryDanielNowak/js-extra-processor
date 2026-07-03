@@ -47,6 +47,18 @@ All values in these tables are measured with default options (instanceof helper 
 | 200 | 209 361 bytes / 11.253% | 8 443 bytes / 1.660% | 2 849 bytes / 0.719% |
 | 240 | 218 938 bytes / 11.768% | 8 918 bytes / 1.754% | 2 953 bytes / 0.745% |
 
+### With all features enabled
+
+| max-aliases | Raw saving | Gzip saving | Brotli saving |
+| --- | --- | --- | --- |
+| 80  | 183 275 bytes / 9.851% | 6 874 bytes / 1.352% | 2 529 bytes / 0.638% |
+| 120 | 200 655 bytes / 10.785% | 7 612 bytes / 1.497% | 2 538 bytes / 0.640% |
+| 160 | 214 330 bytes / 11.520% | 8 082 bytes / 1.589% | 2 728 bytes / 0.688% |
+| 200 | 225 747 bytes / 12.134% | 8 763 bytes / 1.723% | 2 797 bytes / 0.706% |
+| 240 | 235 274 bytes / 12.646% | 8 913 bytes / 1.753% | 2 643 bytes / 0.667% |
+
+Defaults are configured for brotli savings. All features enabled will make raw file smaller, but no gain for brotli. Results might be different for your file.
+
 ## Quick start
 
 ```bash
